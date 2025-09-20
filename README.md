@@ -44,11 +44,11 @@ An MLP framework that takes Lie algebraic data as inputs and is equivariant to t
 ## Citation
 If you find the work useful, please kindly cite our paper:
 ```
-@inproceedings{takakura2023approximation,
-  title={Lie Neurons: Adjoint-Equivariant Neural Networks for Semisimple Lie Algebras},
+@inproceedings{lin2024ln,
+  title={{Lie Neurons}: {Adjoint}-Equivariant Neural Networks for Semisimple {Lie} Algebras},
   author={Lin, Tzu-Yuan and Zhu, Minghan and Ghaffari, Maani},
   booktitle={International Conference on Machine Learning},
-  pages={},
+  pages={30529--30545},
   year={2024},
   organization={PMLR}
 }
