@@ -31,8 +31,20 @@ An MLP framework that takes Lie algebraic data as inputs and is equivariant to t
 * [07/2024] The initial code is open-sourced. We are still re-organizing the code. We plan to release a cleaner version of the code soon. Feel free to reach out if you have any questions! :)
 * [07/2024] We presented our paper at ICML 24!
 
-## Docker
-* We provide [docker](https://docs.docker.com/get-started/) files in [`docker/`](https://github.com/UMich-CURLY/LieNeurons/tree/main/docker).
+## Environment Setup
+
+### Conda (recommended)
+* We provide an [`environment.yml`](environment.yml) for setting up a [conda](https://docs.conda.io/) environment:
+  ```bash
+  conda env create -f environment.yml
+  conda activate lieneurons
+  ```
+* PyTorch is pinned to CUDA 12.8 (`cu128`) wheels so a single environment works on RTX 30-series (`sm_86`), 40-series (`sm_89`), and 50-series (`sm_120`) GPUs. It requires NVIDIA driver r525 or newer.
+* `e3nn` and `emlp` are only needed for the `experiment/so3_bch_*` baselines. Uncomment them in `environment.yml` if you want to run those (note that `emlp` is JAX-based).
+* Always run scripts from the repository root, e.g. `python experiment/sl3_inv_train.py`, since modules such as `core/` and `data_loader/` are imported relative to it.
+
+### Docker
+* Alternatively, we provide [docker](https://docs.docker.com/get-started/) files in [`docker/`](https://github.com/UMich-CURLY/LieNeurons/tree/main/docker).
 * Detailed tutorial on how to build the docker container can be found in the README in each docker folder.
 
 ## Training the Network
