@@ -222,6 +222,8 @@ def killingform(x_hat, d_hat, algebra_type='sl3', feature_wise=False):
         return killingform_so3(x_hat, d_hat, feature_wise)
     elif algebra_type == 'sl3':
         return killingform_sl3(x_hat, d_hat, feature_wise)
+    elif algebra_type == 'se3':
+        return killingform_se3(x_hat, d_hat, feature_wise)
     elif algebra_type == 'sp4':
         return killingform_sp4(x_hat, d_hat, feature_wise)
     else:
@@ -254,6 +256,50 @@ def killingform_sl3(x_hat, d_hat, feature_wise=False):
         kf = rearrange(kf, 'b f d n -> b (f d) n 1')
         
         return kf
+def killingform_se3(x_hat, d_hat, feature_wise=False):
+    """
+    x_hat, d_hat: tensors of arbitrary shape with the last two dimensions 4*4,
+    i.e. se(3) hat matrices [[omega^, t], [0, 0]].
+
+    se(3) is not semisimple, so its Killing form tr(ad_x ad_d) = 4 * (omega_x . omega_d)
+    is degenerate (rank 3): it only sees the rotational slots.  We use the
+    normalized version omega_x . omega_d.  It is Ad-invariant because
+    Ad_T (omega, t) has rotational part R omega and R preserves dot products.
+    Note tr(x_hat^T d_hat) would NOT be invariant: it also picks up t_x . t_d.
+
+    WARNING -- this form is Ad-invariant but NOT a usable substitute for an
+    inner product, and layers that treat it as one are ill-founded on se(3):
+
+      * Radical = t = {(0, v)}, so the returned scalar is blind to the whole
+        translation slot.  LNKillingRelu therefore acts as the EXACT identity
+        on any feature with omega = 0, and its gate never sees v (not even the
+        omega . v channel, which equivariance would actually permit).
+      * LNBatchNorm / LNMaxPool divide by <x,x> = ||omega||^2, which vanishes
+        on t and, deeper in a stack, whenever a bracket output omega1 x omega2
+        goes collinear -- 1/kf blows up (~1e12 at 1e-6 rad) and is only held
+        back by the EPS clamp.
+      * There is no fix inside the invariant-form space: every Ad-invariant
+        symmetric form on se(3) is a*(w1.w2) + b*(w1.v2 + w2.v1), which is
+        degenerate for b = 0 and indefinite (signature (3,3)) for b != 0.
+        se(3) admits NO invariant inner product, so the VN-style "fold across
+        a learned hyperplane" nonlinearity has no metric to fold against.
+
+    Prefer the Lie bracket for nonlinearity, and -- if an invariant scalar gate
+    is needed -- the Klein pairing q^T Q k between DISTINCT channels (never the
+    self-form, which vanishes identically on Pluecker-lifted lines, and never
+    as a divisor).
+    """
+    wx = torch.stack([x_hat[..., 2, 1], x_hat[..., 0, 2], x_hat[..., 1, 0]], dim=-1)
+    wd = torch.stack([d_hat[..., 2, 1], d_hat[..., 0, 2], d_hat[..., 1, 0]], dim=-1)
+    if not feature_wise:
+        return (wx * wd).sum(dim=-1)[..., None]   # [B,F,N,1]
+    else:
+        wx = rearrange(wx, 'b f n k -> b f 1 n k')
+        wd = rearrange(wd, 'b d n k -> b 1 d n k')
+        kf = (wx * wd).sum(dim=-1)
+        kf = rearrange(kf, 'b f d n -> b (f d) n 1')
+        return kf
+
 def killingform_sp4(x_hat, d_hat, feature_wise=False):
     """
     x: a tensor of arbitrary shape with the last two dimension of size 4*4

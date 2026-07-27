@@ -124,9 +124,9 @@ class LNLieBracketNoResidualConnect(nn.Module):
         # torch.nn.init.uniform_(self.learn_dir.weight, a=0.0, b=0.5)
         # torch.nn.init.uniform_(self.learn_dir2.weight, a=0.0, b=0.5)
 
-        self.HatLayer = HatLayer()
+        self.HatLayer = HatLayer(algebra_type)
         self.relu = LNKillingRelu(
-            in_channels, share_nonlinearity=share_nonlinearity)
+            in_channels, algebra_type=algebra_type, share_nonlinearity=share_nonlinearity)
 
 
     def forward(self, x):
@@ -418,7 +418,7 @@ class LNInvariant(nn.Module):
 
         self.hat_layer = HatLayer(algebra_type=algebra_type)
         self.learned_dir = LNLinearAndKillingRelu(
-            in_channel, dir_dim, share_nonlinearity=True)
+            in_channel, dir_dim, algebra_type=algebra_type, share_nonlinearity=True)
         self.method = method
         self.algebra_type = algebra_type
 

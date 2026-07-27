@@ -177,3 +177,9 @@ training_all.txt
 eval_results.txt
 eval_aug_mlp.txt
 training_mlp_aug_equiv.txt
+
+## document
+docs/
+
+## results
+*.json
