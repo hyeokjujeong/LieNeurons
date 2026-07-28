@@ -76,6 +76,17 @@ def adjoint_inv(R, p):
     return adjoint(R.transpose(-1, -2), -R.transpose(-1, -2) @ p)
 
 
+def coadjoint(R, p):
+    """6x6 coadjoint Ad_T^{-T} acting on wrenches stored [f; m]:
+
+        f -> R f,        m -> R m + p x R f,
+
+    i.e. the block matrix [[R, 0], [p^ R, R]] — the mirror image of adjoint():
+    for twists the angular slot is translation-blind, for wrenches the force
+    slot is.  Numerically adjoint_inv(R, p)^T (closed form, no solve)."""
+    return adjoint_inv(R, p).transpose(-1, -2)
+
+
 def klein_Q(dtype=torch.float64, device=None):
     """Gram matrix of the Klein form, i.e. the musical FLAT map
 

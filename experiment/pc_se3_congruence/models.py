@@ -206,6 +206,57 @@ class ModelCNaiveBracket(nn.Module):
         return Y @ Y.transpose(1, 2) / Y.shape[-1]
 
 
+# ------------------------------------ end-to-end PC -> L, K = L L^T pipeline
+class CovectorGramHeadLK(nn.Module):
+    """L = Z / sqrt(C) from the final wrench features Z in [B, 6, C], and
+    K = L L^T.  Since Z -> Ad_T^{-T} Z, we get  L -> Ad_T^{-T} L  and
+    K -> Ad_T^{-T} K Ad_T^{-1}  (congruence) for free.
+
+    Order matters: output L and FORM K from it.  A Cholesky factor of an
+    equivariant K would not itself be equivariant (Cholesky depends on the
+    basis ordering), so L-first is the only correct direction."""
+
+    def forward(self, z):
+        Z = z.squeeze(-1).transpose(1, 2)                     # [B, 6, C]
+        L = Z / Z.shape[-1] ** 0.5
+        return L, L @ L.transpose(1, 2)
+
+
+class ModelPC2K(nn.Module):
+    """Fully covector-native stiffness pipeline:
+
+        P -> pure-force wrench lift -> LNLinear + covector-bracket backbone
+          -> (L, K = L L^T)
+
+    Every feature from the encoder onward lives in se(3)* and transforms by
+    the coadjoint Ad_T^{-T}; no Q is constructed anywhere.  Hence
+        L(T.P) = Ad_T^{-T} L(P),    K(T.P) = Ad_T^{-T} K(P) Ad_T^{-1}."""
+
+    def __init__(self, encoder, channels=(8, 16, 16, 8)):
+        super().__init__()
+        self.encoder = encoder
+        self.backbone = CovectorBackbone(channels)
+        self.head = CovectorGramHeadLK()
+
+    def forward(self, P):
+        return self.head(self.backbone(self.encoder(P)))
+
+
+class ModelPC2KNaiveBracket(nn.Module):
+    """NEGATIVE CONTROL: same wrench encoder, but the TWIST backbone (ordinary
+    se(3) Lie bracket) run on the wrench features.  Equivariant for Ad, not
+    Ad^{-T}: passes at p = 0, fails at O(1) once translation enters."""
+
+    def __init__(self, encoder, channels=(8, 16, 16, 8)):
+        super().__init__()
+        self.encoder = encoder
+        self.backbone = Backbone(channels)
+        self.head = CovectorGramHeadLK()
+
+    def forward(self, P):
+        return self.head(self.backbone(self.encoder(P)))
+
+
 # --------------------------------------------------------- negative controls
 class NaiveHeadNoKlein(nn.Module):
     """K = Z Z^T without the Klein intertwiner: has the WRONG type — it
