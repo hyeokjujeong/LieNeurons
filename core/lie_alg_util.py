@@ -165,7 +165,7 @@ def vee_so3(M):
     # [0 , -z, y ]
     # [z ,  0, -x]
     # [-y,  x, 0 ]
-    v = torch.zeros(M.shape[:-2]+(3,)).to(M.device)
+    v = torch.zeros(M.shape[:-2]+(3,), dtype=M.dtype, device=M.device)
     v[..., 0] = M[..., 2, 1]
     v[..., 1] = M[..., 0, 2]
     v[..., 2] = M[..., 1, 0]
@@ -175,7 +175,7 @@ def vee_sl3(M):
     # [a1 + a4, a2 - a3,    a5]
     # [a2 + a3, a4 - a1,    a6]
     # [     a7,      a8, -2*a4]
-    v = torch.zeros(M.shape[:-2]+(8,)).to(M.device)
+    v = torch.zeros(M.shape[:-2]+(8,), dtype=M.dtype, device=M.device)
     v[..., 3] = -0.5*M[..., 2, 2]
     v[..., 4] = M[..., 0, 2]
     v[..., 5] = M[..., 1, 2]
@@ -192,7 +192,7 @@ def vee_se3(M):
     # [wz ,   0, -wx,  ty]
     # [-wy,  wx,   0,  tz]
     # [  0,   0,   0,   0]
-    v = torch.zeros(M.shape[:-2]+(6,)).to(M.device)
+    v = torch.zeros(M.shape[:-2]+(6,), dtype=M.dtype, device=M.device)
 
     v[..., 0] = M[..., 0, 3]
     v[..., 1] = M[..., 1, 3]
@@ -203,7 +203,7 @@ def vee_se3(M):
     return v
 
 def vee_sp4(M):
-    v = torch.zeros(M.shape[:-2]+(10,)).to(M.device)
+    v = torch.zeros(M.shape[:-2]+(10,), dtype=M.dtype, device=M.device)
 
     v[..., 0] = M[..., 0, 0]
     v[..., 1] = M[..., 0, 1]

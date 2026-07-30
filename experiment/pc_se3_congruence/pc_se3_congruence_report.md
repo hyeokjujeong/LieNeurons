@@ -15,7 +15,7 @@ We show, by construction and by float64-precision numerical verification with **
 - **(B)** a *stiffness-type* output $K(T\cdot P)=\mathrm{Ad}_T^{-\top}K(P)\,\mathrm{Ad}_T^{-1}$, obtained from the same backbone with a single Klein-form intertwiner $Y=QZ$ in the head;
 - **(C)** for covector ($\mathfrak{se}(3)^{*}$) inputs — raised to twists by the sharp map $Q^{-1}$, processed, then lowered again by $Q$ — one-step equivariance and the two-step *cascade* property: if $T_1$ produces $K_1$, then $T_2T_1$ produces $K_2=\mathrm{Ad}_{T_2}^{-\top}K_1\mathrm{Ad}_{T_2}^{-1}$.
 
-Two point-cloud $\to\mathfrak{se}(3)$ encoders are tested — the closed-form pairwise Plücker lifting and a learnable VN-DGCNN direction-field lifting — and we prove that they are two parameterizations of the *same* underlying map, the origin-referenced screw lifting $L_0(r,n)=(n,\ r\times n)$. All positive tests sit at the float64 round-off floor ($10^{-16}$–$10^{-12}$ across translation magnitudes $\lVert p\rVert\in\{0,1,10^2,10^4\}$), while five intentionally broken negative controls fail at $O(1)$ whenever $p\neq 0$, confirming the discriminative power of the test suite. Experiment C additionally settles whether the covector space carries a nonlinearity of its own: the Lie bracket applied directly to wrenches fails at $O(1)$ (it is equivariant for $\mathrm{Ad}$, not $\mathrm{Ad}^{-\top}$), yet the transported bracket $[F_1,F_2]_{*}=(f_1\times m_2-f_2\times m_1,\ f_1\times f_2)$ yields a congruence-equivariant pipeline that never constructs $Q$ — the dual's equivariant bilinear space having dimension 2, the same as $\mathfrak{se}(3)$'s (§4.4). As a prerequisite we completed the repository's $\mathfrak{se}(3)$ support (`killingform_se3` plus two latent bugs), so that `LNKillingRelu`, `LNBatchNorm`, `LNMaxPool`, and `LNInvariant` no longer raise on $\mathfrak{se}(3)$ and all pass equivariance checks at $10^{-16}$ (float64). We nonetheless argue against using them: $\mathfrak{se}(3)$ admits **no** Ad-invariant inner product — every invariant symmetric form is degenerate or of signature $(3,3)$ — so the VN-style "fold against a learned direction" nonlinearity has no metric to fold against, and the Killing branch degenerates to the exact identity on the translation ideal (§5.1). The Lie bracket, which needs no form at all, is the nonlinearity used throughout.
+Two point-cloud $\to\mathfrak{se}(3)$ encoders are tested — the closed-form pairwise Plücker lifting and a learnable VN-DGCNN direction-field lifting — and we prove that they are two parameterizations of the *same* underlying map, the origin-referenced screw lifting $L_0(r,n)=(n,\ r\times n)$. All positive tests sit at the float64 round-off floor ($10^{-16}$–$10^{-12}$ across translation magnitudes $\lVert p\rVert\in\{0,1,10^2,10^4\}$), while five intentionally broken negative controls fail at $O(1)$ whenever $p\neq 0$, confirming the discriminative power of the test suite. Experiment C additionally settles whether the covector space carries a nonlinearity of its own: the Lie bracket applied directly to wrenches fails at $O(1)$ (it is equivariant for $\mathrm{Ad}$, not $\mathrm{Ad}^{-\top}$), yet the transported bracket $[F_1,F_2]_{*}=(f_1\times m_2-f_2\times m_1,\ f_1\times f_2)$ yields a congruence-equivariant pipeline that never constructs $Q$ — the dual's equivariant bilinear space having dimension 2, the same as $\mathfrak{se}(3)$'s (§4.4). As a prerequisite we completed the repository's $\mathfrak{se}(3)$ support (`killingform_se3` plus two latent bugs), so that `LNKillingRelu`, `LNBatchNorm`, `LNMaxPool` and `LNInvariant` no longer raise on $\mathfrak{se}(3)$. None of them is used here: since $\mathfrak{se}(3)$ admits no Ad-invariant inner product, Killing-based gating and normalization are ill-founded on it, and the Lie bracket — which needs no form at all — is the nonlinearity throughout.
 
 ---
 
@@ -36,7 +36,7 @@ Two point-cloud $\to\mathfrak{se}(3)$ encoders are tested — the closed-form pa
 | Then is there *any* nonlinearity native to $\mathfrak{se}(3)^{*}$? | **Yes, and it is essentially unique**: the transported bracket $[F_1,F_2]_{*}=(f_1\times m_2-f_2\times m_1,\ f_1\times f_2)$, giving a $Q$-free pipeline. But it exists *because* $Q$ makes $\mathfrak{g}\cong\mathfrak{g}^{*}$. | §4.4, Exp. C5–C7 |
 | Are the Plücker lifting and the learnable lifting the same operation? | **Yes** — both are the origin-referenced screw lifting $L_0(r,n)=(n, r\times n)$; they differ only in where the direction $n$ comes from. | §3, Exp. L1/L2: $\le 2.8\text{e-}16$ |
 | Was the repo's $\mathfrak{se}(3)$ support complete? | **No** — `killingform` had no se3 branch and two layers had latent bugs; now fixed and verified. | §5 |
-| Should the $\mathfrak{se}(3)$ Killing form then be used for gating/normalization? | **No.** $\mathfrak{se}(3)$ admits no invariant inner product; the Killing branch is blind to $v$ and is the exact identity on $\mathfrak{t}$. Experiments A–C use zero Killing form (0 calls, runtime-verified). | §5.1 |
+| Should the $\mathfrak{se}(3)$ Killing form then be used for gating/normalization? | **No.** $\mathfrak{se}(3)$ admits no invariant inner product; the Killing branch is blind to $v$ and is the exact identity on $\mathfrak{t}$. Experiments A–C use zero Killing form (0 calls, runtime-verified). | §5, `check_killing_degeneracy.py` |
 
 As in the companion report (`exp.md`), the entire judgement rests on the $p\neq 0$ region: every negative control passes perfectly at $p=0$ because $\mathrm{Ad}_{(R,0)}$ is orthogonal, and is exposed only once translations enter.
 
@@ -221,29 +221,7 @@ Before this work `core/` ran `LNLinear`, `LNLieBracket` and `LNLinearAndLieBrack
 | `LNMaxPool` | `ValueError` | — | $0.0$ |
 | `LNInvariant` (invariance) | `ValueError` | $4.3\text{e-}16$ | — |
 
-None of these layers is used in experiments A–C: a runtime tripwire counts **0** `killingform` calls across every forward pass. That is deliberate, and §5.1 says why.
-
-### 5.1 The Killing form is Ad-invariant, but $\mathfrak{se}(3)$ has no invariant inner product
-
-The numbers above are genuine — degeneracy does not break equivariance, since $\omega_x\!\cdot\!\omega_d$ is an invariant scalar regardless. They should not, however, be read as endorsing the layers. `LNKillingRelu`, `LNBatchNorm` and `LNMaxPool` fold or normalize against a learned direction, and that construction presupposes an invariant inner product. $\mathfrak{se}(3)$ has none.
-
-> **Proposition.** Every Ad-invariant symmetric bilinear form on $\mathfrak{se}(3)$ is
-> $$M_{a,b}=\begin{bmatrix} a I_3 & b I_3\\ b I_3 & 0\end{bmatrix},\qquad
-> \xi^{\top}M_{a,b}\,\xi = a\lVert\omega\rVert^{2}+2b\,(\omega\!\cdot\! v),\qquad a,b\in\mathbb{R}.$$
-> It is **degenerate** for $b=0$ (radical $\mathfrak{t}$, rank 3) and **indefinite** of signature $(3,3)$ for $b\neq0$. Hence no Ad-invariant inner product exists.
-
-*Proof.* The 2-dimensionality and the block form of $M_{a,b}$ are Theorem 3.2 of `docs/se3_equivariant_pointcloud.md`, equivalently Theorem 5.4 (eq. 24) of `pc_to_se3_mapping_en.pdf`, whose $[\omega\,;\,v]$ blocks are the ones written above. For $b=0$, $M_{a,0}\xi=(a\omega,0)$, so the radical is $\{\omega=0\}=\mathfrak{t}$. For $b\neq0$, fix $\omega\neq0$ and put $v=t\omega$: the self-form is $(a+2bt)\lVert\omega\rVert^{2}$, which takes both signs as $t$ ranges over $\mathbb{R}$; and $\det M_{a,b}=-b^{6}\neq0$, so it is non-degenerate. $\blacksquare$ *(Verified: signature $(+3,-0,\text{null }3)$ at $b=0$; $(+3,-3,\text{null }0)$ for every $b\neq0$ sampled. Signatures and ranks are invariant under the $\Pi$-conjugation of §2, so they hold verbatim for the code's $[v\,;\,\omega]$ storage.)*
-
-Measured consequences for the Killing branch $b=0$:
-
-| Symptom | Measurement |
-|---|---|
-| Killing Gram rank / radical | 3 of 6; radical $=\mathfrak{t}=\{(0,v)\}$ |
-| `LNKillingRelu` on $\omega=0$ features | $\lVert\text{out}-\text{in}\rVert = 0.000\text{e}{+}00$ — **exactly the identity** on the whole ideal $\mathfrak{t}$ |
-| Gate sensitivity to the $v$ slot | $0.000\text{e}{+}00$ — the gate cannot see $v$ at all, not even the $\omega\!\cdot\! v$ channel that Proposition 5.3 of the companion analysis would permit |
-| `LNBatchNorm` divisor $\lVert\omega\rVert^{2}$ on bracket outputs $\omega_1\times\omega_2$ | $1/kf \approx 10^{6}$ at $10^{-3}$ rad, $10^{12}$ at $10^{-6}$ rad — held back only by the `EPS` clamp |
-
-So the Killing form buys an invariant scalar blind to half of $\mathfrak{se}(3)$, and the layers built on it collapse to the identity exactly on the translation ideal — which is why experiments A–C take the Lie bracket as their only nonlinearity. Two options survive, and they exhaust the space: the **Lie bracket**, which needs no form at all; and the **Klein pairing** $q^{\top}Qk$ between *distinct* channels as a bounded gate, safe provided one never takes the self-form (identically zero on Plücker-lifted lines) nor divides by it. `killingform_se3` now carries this caveat in its docstring.
+These are bug fixes, not endorsements. None of the unlocked layers is used in experiments A–C — a runtime tripwire counts **0** `killingform` calls across every forward pass — because $\mathfrak{se}(3)$ admits no Ad-invariant inner product, so the VN-style "fold against a learned direction" that `LNKillingRelu` / `LNBatchNorm` / `LNMaxPool` implement has no metric to fold against. `killingform_se3` carries this caveat in its docstring, and `check_killing_degeneracy.py` reproduces the supporting numbers (rank 3 radical $\mathfrak{t}$; `LNKillingRelu` exactly the identity on $\mathfrak{t}$; the $\lVert\omega\rVert^{2}$ normalizer diverging on near-collinear bracket outputs). The Lie bracket, which needs no form at all, is the nonlinearity used throughout.
 
 ---
 
@@ -273,6 +251,12 @@ All values are max scaled error over 5 trials, except the six rows noted in §6 
 
 ### 7.1 Experiment 0 — algebraic identities
 
+**What.** The four matrix identities (I-1)–(I-4) plus the involution $Q^{2}=I_6$, checked directly on $6\times6$ matrices.
+
+**Why.** Every equivariance proof in §3–§4 rests on these; a convention slip (wrong block order, wrong sign of $\hat p$, flat/sharp confusion) would silently invalidate everything downstream. Testing them separately localizes such a mistake here instead of letting it surface as an unexplained end-to-end failure.
+
+**Setup.** No network and no data — only $\mathrm{Ad}_T$, $\mathrm{Ad}_{T}^{-1}$ (closed form $\mathrm{Ad}_{T^{-1}}$) and $Q$. Five random $T$ per translation scale.
+
 | Check | $p=0$ | $\lVert p\rVert\sim1$ | $\sim10^2$ | $\sim10^4$ |
 |---|---|---|---|---|
 | O1 $\mathrm{Ad}_{T_2}\mathrm{Ad}_{T_1}=\mathrm{Ad}_{T_2T_1}$ | 1.5e-16 | 2.7e-16 | 4.5e-16 | 3.9e-16 |
@@ -283,6 +267,12 @@ All values are max scaled error over 5 trials, except the six rows noted in §6 
 
 ### 7.2 Experiment L — lifting layer
 
+**What.** The point cloud $\to\mathfrak{se}(3)$ stage in isolation: the two closed-form moment identities of §3.3, and $\mathrm{Ad}$-equivariance of both encoders.
+
+**Why.** The lifting is the only place where the $SE(3)$ action on points becomes an $\mathrm{Ad}$ action on features, so it is where translation information either enters correctly or is destroyed. Isolating it separates "the encoder is wrong" from "the backbone is wrong" in experiments A and B. L5 additionally quantifies the anchor-transport trap, the failure mode the companion documents identify as the easiest to miss.
+
+**Setup.** $B=2$ clouds of $N=64$ Gaussian points ($\sigma=2$), $k=8$ neighbors. Plücker encoder: parameter-free, channel $c$ = the rank-$c$ neighbor. Learnable encoder: VN-DGCNN ($1\to8\to8\to8$, EdgeConv $\times2$ + VN-linear + VN-LeakyReLU) with random weights, run in three modes — `origin`, `anchor_transport`, and `no_transport` (L5) — sharing one state dict so the three differ *only* in the transport step.
+
 | Check | $p=0$ | $\sim1$ | $\sim10^2$ | $\sim10^4$ |
 |---|---|---|---|---|
 | L1 $r_i\times d_{ij}=r_i\times r_j$ (Lemma 1) | 1.1e-16 | | | |
@@ -292,6 +282,12 @@ All values are max scaled error over 5 trials, except the six rows noted in §6 
 | **L5 no anchor transport** | 2.0e-15 | **6.7e-01** | **1.0e+00** | **1.0e+00** |
 
 ### 7.3 Experiment A — $C(T\cdot P)=\mathrm{Ad}_T C\,\mathrm{Ad}_T^{\top}$
+
+**What.** Whether a Lie Neurons network can output a twist–twist (compliance-type) tensor obeying the covariant congruence law.
+
+**Why.** This is the cheaper of the two target laws: a plain Gram head $ZZ^{\top}$ already transforms as $\mathrm{Ad}\,(\cdot)\,\mathrm{Ad}^{\top}$, so if it works, the whole pipeline can be built with **no invariant form anywhere** — directly relevant to the bracket-only program, which deliberately withholds the Klein form. A3 isolates the backbone square of the commuting diagram so that an encoder fault cannot be mistaken for a backbone fault; A4 confirms the test can actually detect a broken network.
+
+**Setup.** Encoder (Plücker or learnable) $\to$ 3 blocks of `LNLinearAndLieBracket(algebra_type='se3')`, channels $8\to16\to16\to8$ $\to$ head $C=ZZ^{\top}/C_{\text{out}}$. Random weights, no training. A3 feeds $\mathrm{Ad}_T V_0$ to the backbone directly rather than transforming the cloud. A4 clones A1's weights and adds a bias ($\sigma=0.5$) to the first `LNLinear`.
 
 | Check | $p=0$ | $\sim1$ | $\sim10^2$ | $\sim10^4$ |
 |---|---|---|---|---|
@@ -304,6 +300,12 @@ Verdict: **design (A) is realizable with linear + bracket layers only, and needs
 
 ### 7.4 Experiment B — $K(T\cdot P)=\mathrm{Ad}_T^{-\top}K\,\mathrm{Ad}_T^{-1}$
 
+**What.** Whether the *same* backbone as experiment A can output a wrench–wrench (stiffness-type) tensor, which obeys the contravariant congruence law instead.
+
+**Why.** A stiffness maps twists to wrenches, so it is a tensor on the dual space and transforms by $\mathrm{Ad}^{-\top}(\cdot)\mathrm{Ad}^{-1}$, not $\mathrm{Ad}(\cdot)\mathrm{Ad}^{\top}$. The question is how much machinery this costs: the claim under test is that a **single constant matrix in the head** suffices, with the backbone untouched. B4 measures the price of getting the type wrong, and is the sharpest control in the report — $ZZ^{\top}$ is not merely inaccurate, it is a different tensor type. B5 checks a regularizer that looks harmless and is not.
+
+**Setup.** Identical to A except the head: $Y=QZ$ (flat map, I-3) then $K=YY^{\top}/C_{\text{out}}$. B3 reports $\mathrm{eig}(K)$ to confirm the head yields a genuine PSD matrix, full-rank because $C_{\text{out}}=8\ge6$. B4 clones B1's weights and deletes $Q$ from the head. B5 keeps B1 intact and post-composes $K\mapsto K+\varepsilon I_6$, $\varepsilon=10^{-3}$.
+
 | Check | $p=0$ | $\sim1$ | $\sim10^2$ | $\sim10^4$ |
 |---|---|---|---|---|
 | B1 end-to-end, Plücker encoder | 1.3e-15 | 8.0e-16 | 5.7e-15 | 3.5e-13 |
@@ -315,6 +317,26 @@ Verdict: **design (A) is realizable with linear + bracket layers only, and needs
 Verdict: **one constant matrix $Q$ in the head converts design (A) into design (B).** B4 quantifies the type error of omitting it: $ZZ^{\top}$ transforms covariantly ($\mathrm{Ad}\,\cdot\,\mathrm{Ad}^{\top}$), which coincides with the required contravariant law only on the orthogonal subgroup $p=0$.
 
 ### 7.5 Experiment C — covector input, cascade
+
+**What.** The setting where the input is already a batch of wrenches (e.g. measured contact forces/moments) rather than a point cloud. C1–C3 are three *different* statements, easily conflated:
+
+| | statement | transforms | baseline compared against | network? |
+|---|---|---|---|---|
+| **C1** | $f(\mathrm{Ad}_T^{-\top}W_0)=\mathrm{Ad}_T^{-\top}f(W_0)\mathrm{Ad}_T^{-1}$ | one, $T$ | the **untransformed** output $f(W_0)$ | yes, 1 evaluation |
+| **C2** | $f(\mathrm{Ad}_{T_2T_1}^{-\top}W_0)=\mathrm{Ad}_{T_2}^{-\top}K_1\mathrm{Ad}_{T_2}^{-1}$ | two, $T_1$ then $T_2$ | the **already-transformed** output $K_1=f(\mathrm{Ad}_{T_1}^{-\top}W_0)$ | yes, 2 evaluations |
+| **C3** | $\mathrm{Ad}_{T_2T_1}^{-\top}=\mathrm{Ad}_{T_2}^{-\top}\mathrm{Ad}_{T_1}^{-\top}$ | two | — (pure matrix identity) | **no** |
+
+C1 is per-transform equivariance measured from the origin of the chain. C2 is the property actually wanted in use: *given the estimate $K_1$ already produced in frame $T_1$, does moving a further $T_2$ transform $K_1$ by congruence?* — the baseline is $K_1$, and $W_0$ never appears on the right-hand side. C3 removes the network entirely and asks only whether the dual action is a group homomorphism.
+
+**Why.** Logically $\text{C1}+\text{C3}\Rightarrow\text{C2}$: apply C1 with input $\mathrm{Ad}_{T_1}^{-\top}W_0$ and transform $T_2$, then rewrite $\mathrm{Ad}_{T_2}^{-\top}\mathrm{Ad}_{T_1}^{-\top}$ as $\mathrm{Ad}_{T_2T_1}^{-\top}$ using C3. So C2 is not independent evidence — it is the end-to-end check that the two halves compose in the right *order*, which is exactly where a convention slip would land.
+
+C3 is worth isolating because it is not automatic. Transposition reverses order, and so does inversion; in $\mathrm{Ad}^{-\top}$ the two reversals cancel,
+$$(\mathrm{Ad}_{T_2}\mathrm{Ad}_{T_1})^{-\top}=\mathrm{Ad}_{T_2}^{-\top}\mathrm{Ad}_{T_1}^{-\top},$$
+so the dual action is a genuine left representation. Had the dual been modelled by $\mathrm{Ad}_T^{\top}$ or $\mathrm{Ad}_T^{-1}$ alone — each a plausible-looking choice — it would be an *anti*-homomorphism, C3 would fail, and C2 would fail with it while C1 still passed. C3 is the dual counterpart of O1.
+
+C4–C7 then ask the structural question this experiment was extended to answer: is the raise-process-lower detour *necessary*, or does $\mathfrak{se}(3)^{*}$ carry a nonlinearity of its own?
+
+**Setup.** Input $W_0\sim\mathcal N(0,1)^{2\times8\times6\times1}$, no point cloud involved. Model C = $Q^{-1}$ (sharp) $\to$ the same 3-block twist backbone $\to$ head B. For the cascade, $T_1$ is drawn once at $\lVert p_1\rVert\sim1$ and $T_2$ is swept over the translation scales. C4–C7 compare four $Q$-free variants against it, all on the same input: linear-only, twist bracket applied to wrenches, the native covector bracket (4.4), and a direct enumeration of the equivariant bilinear space on the dual (method in §6).
 
 | Check | $p=0$ | $\sim1$ | $\sim10^2$ | $\sim10^4$ |
 |---|---|---|---|---|
@@ -352,7 +374,7 @@ Positive tests grow from $10^{-16}$ to $10^{-13\ldots-12}$ as $\lVert p\rVert$ g
 
 **Where the Klein form is — and is not — needed.** The bracket-only program of `docs/se3_equivariant_pointcloud.md` holds the Klein form back from the *backbone* (and must: lifted lines have zero pitch, so $K(\xi,\xi)=0$ makes Klein self-normalization a division by zero). This experiment shows the compliance-type output (A) keeps the entire pipeline Klein-free, while the stiffness-type output (B) needs $Q$ exactly once, as a constant head intertwiner — a role in which degeneracy of inputs is irrelevant since $Q$ is never inverted against a feature. The two uses are orthogonal to the concerns in either source document, and consistent with both.
 
-Consequently, recommendation #1 of `docs/se3_equivariant_pointcloud.md` §6.6 ("implement `killingform_se3`; it unlocks normalization and gating") should be read as **superseded on the gating/normalization point** — §5.1 shows that route does not exist. The function itself remains the correct implementation of the Killing form and the two bug fixes stand; only the recommended *use* changes.
+Consequently, recommendation #1 of `docs/se3_equivariant_pointcloud.md` §6.6 ("implement `killingform_se3`; it unlocks normalization and gating") should be read as **superseded on the gating/normalization point** (§5): that route does not exist. The function itself remains the correct implementation of the Killing form and the two bug fixes stand; only the recommended *use* changes.
 
 **What experiment C actually settles.** In its one-step and cascade form (C1–C3) it is a pure representation-theory statement, and with the raise/lower pair it inherits all of A/B's machinery. The sharper question is C4–C7: *does the covector space carry its own nonlinearity, or is the detour through $\mathfrak{se}(3)$ forced?* The answer is a genuine both-ways result. The Lie bracket **cannot** be used on covectors as-is — it is a map $\mathfrak{g}\times\mathfrak{g}\to\mathfrak{g}$, equivariant for $\mathrm{Ad}$ and not $\mathrm{Ad}^{-\top}$, and C4 measures the cost at $O(1)$ once $p\neq0$ (with the usual $p=0$ blind spot). But the dual is not barren: $[\cdot,\cdot]_{*}$ of (4.4) is a closed-form equivariant bilinear operation on $\mathfrak{se}(3)^{*}$, and C5 runs an entire congruence-equivariant pipeline without constructing $Q$ once. C7 shows by enumeration that the dual's equivariant bilinear space has dimension 2 — the same as $\mathfrak{se}(3)$'s — so nothing beyond $[\cdot,\cdot]_{*}$ and $N_{*}$ is hiding there.
 
@@ -369,7 +391,7 @@ The structural reading matters more than the implementation win. Everything on t
 ```bash
 conda activate lieneurons
 python experiment/pc_se3_congruence/verify.py                    # ~1.2 s, writes results.json
-python experiment/pc_se3_congruence/check_killing_degeneracy.py  # backs section 5.1
+python experiment/pc_se3_congruence/check_killing_degeneracy.py  # backs section 5
 python docs/scripts/check_layers.py                              # regression check of core layers
 ```
 
@@ -383,7 +405,7 @@ Files:
 | `experiment/pc_se3_congruence/encoders.py` | Plücker encoder, minimal VN stack, learnable lift (3 modes) |
 | `experiment/pc_se3_congruence/models.py` | backbone (LNLinear+LNLieBracket), heads A/B, model C, covector algebra ($[\cdot,\cdot]_{*}$, `CovectorBackbone`, `ModelCNative`), negative controls |
 | `experiment/pc_se3_congruence/verify.py` | experiments 0, L, A, B, C (incl. C4–C7 covector study); Killing-form tripwire; writes `results.json` |
-| `experiment/pc_se3_congruence/check_killing_degeneracy.py` | §5.1: rank/radical, no-invariant-inner-product proposition, `LNKillingRelu` degeneracies, normalizer blow-up |
+| `experiment/pc_se3_congruence/check_killing_degeneracy.py` | §5: rank/radical, no-invariant-inner-product enumeration, `LNKillingRelu` degeneracies, normalizer blow-up |
 | `core/lie_alg_util.py` | **modified**: `killingform_se3` + dispatch branch, with a docstring warning against gating/normalization use |
 | `core/lie_neurons_layers.py` | **modified**: two `algebra_type` propagation bugs fixed |
 

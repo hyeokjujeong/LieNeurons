@@ -181,5 +181,9 @@ training_mlp_aug_equiv.txt
 ## document
 docs/
 
+## fig
+experiment/pc_se3_congruence/figs/
+
 ## results
 *.json
+*.pt
