@@ -232,3 +232,48 @@ class WrenchLearnableLiftEncoder(nn.Module):
                            torch.einsum('bij,bcj->bci', ch, W[:, :, 0:3])],
                           dim=-1)
         return W.unsqueeze(-1)                                # [B, C, 6, 1]
+
+class BracketPlueckerEncoder(nn.Module):
+    """Wrench Pluecker lift + PRE-POOLING covector-bracket channels (design A).
+
+    Parity fix for the rank-collapse (bracket_blockage_analysis.md §3.3.4,
+    project summary §7-1A): under the antipodal map d -> -d the first-moment
+    f-channels are ODD and cancel on symmetric clouds, while the per-point
+    bracket output f = d_a x d_b flips sign twice -> EVEN, so it survives
+    mean pooling.  Geometrically d_a x d_b is a local surface-normal
+    (pseudo-vector) direction.
+
+    Channels: k first-moment wrenches (odd f / even m) + (k-1) consecutive
+    rank-pair bracket wrenches (even f / odd m) = 2k-1 total — the two
+    parity families cover both slots regardless of symmetry.
+
+    NOTE (stabilizer limit): PROPER symmetries in SE(3) (e.g. a C2 axis)
+    confine *any* equivariant vector channel to the fixed subspace — this
+    encoder fixes improper (-I) collapse but provably cannot fix C2.
+    """
+
+    def __init__(self, k=8):
+        super().__init__()
+        self.k = k
+        self.out_channels = 2 * k - 1
+
+    def forward(self, P):
+        """P: [B, N, 3] -> W: [B, 2k-1, 6, 1] stored [f; m]"""
+        B, N, _ = P.shape
+        idx = knn_indices(P, self.k)
+        nbr = torch.gather(P.unsqueeze(2).expand(B, N, self.k, 3), 1,
+                           idx.unsqueeze(-1).expand(B, N, self.k, 3))
+        f = nbr - P.unsqueeze(2)                              # [B, N, k, 3]
+        m = torch.cross(P.unsqueeze(2).expand_as(f), f, dim=-1)
+        w = torch.cat([f, m], dim=-1)                         # [B, N, k, 6]
+
+        # per-point covector bracket of consecutive rank pairs (a, a+1)
+        fa, ma = f[:, :, :-1], m[:, :, :-1]
+        fb, mb = f[:, :, 1:], m[:, :, 1:]
+        br_f = torch.cross(fa, fb, dim=-1)                    # 짝수 (even)
+        br_m = (torch.cross(fa, mb, dim=-1)
+                - torch.cross(fb, ma, dim=-1))                # 홀수 (odd)
+        wbr = torch.cat([br_f, br_m], dim=-1)                 # [B, N, k-1, 6]
+
+        W = torch.cat([w, wbr], dim=2).mean(dim=1)            # [B, 2k-1, 6]
+        return W.unsqueeze(-1)

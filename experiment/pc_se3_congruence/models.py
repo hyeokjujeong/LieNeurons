@@ -257,6 +257,102 @@ class ModelPC2KNaiveBracket(nn.Module):
         return self.head(self.backbone(self.encoder(P)))
 
 
+# ----------------------------------------- invariant Gram gating (PDF §6.2)
+def klein_gram(x):
+    """Pairwise Klein pairings S_cd = x_c^T Q^{-1} x_d over channels.
+
+    Storage-agnostic: for x stored [a; b] (covector [f; m] or twist [v; w]),
+    x_c^T Q x_d = a_c . b_d + b_c . a_d, which is the correct invariant of the
+    respective representation in both orders (Q is the block swap, Q^{-1}=Q).
+    x: [B, C, 6, N] -> S: [B, C, C, N], invariant under the group action.
+    """
+    a, b = x[:, :, 0:3], x[:, :, 3:6]
+    return (torch.einsum('bcin,bdin->bcdn', a, b)
+            + torch.einsum('bcin,bdin->bcdn', b, a))
+
+
+class GramGate(nn.Module):
+    """General Q-Gram gate: any function of S(X) = X^T Q^{-1} X modulates
+    channels (Coadjoint_Equivariant_Network.pdf §6.2).  Here each channel is
+    gated by a small MLP over its row of the Gram matrix; the rank-1 bilinear
+    Q-Gram gate  nu(X)_c = x_c phi(q_c^T Q^{-1} k_c)  (eq. 11) is the special
+    case where the MLP collapses to a fixed bilinear form.
+
+    The gate multiplies the WHOLE 6-vector channel (slot-wise gating breaks
+    equivariance because Ad^{-T} is block-triangular; see
+    bracket_blockage_analysis.md §4.1).  Bounded 1 + tanh — never divide by
+    invariants (null-cone hazard, PDF Remark 6.5).
+    """
+
+    def __init__(self, in_channels, hidden=None):
+        super().__init__()
+        h = hidden or in_channels
+        self.mlp = nn.Sequential(nn.Linear(in_channels, h), nn.Tanh(),
+                                 nn.Linear(h, 1))
+
+    def forward(self, x):                              # [B, C, 6, N]
+        S = klein_gram(x)                              # [B, C, C, N] invariant
+        g = self.mlp(S.permute(0, 1, 3, 2))            # [B, C, N, 1]
+        g = 1 + torch.tanh(g.squeeze(-1))              # [B, C, N] bounded
+        return g.unsqueeze(2) * x                      # 채널 전체에 곱
+
+
+class LNLinearAndGramGate(nn.Module):
+    """LNLinear + GramGate — bracket 대신 gate를 비선형성으로 쓰는 블록."""
+
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.linear = LNLinear(in_channels, out_channels)
+        self.gate = GramGate(out_channels)
+
+    def forward(self, x):
+        return self.gate(self.linear(x))
+
+
+class GateBackbone(nn.Module):
+    """LNLinear + GramGate stack.  Storage-agnostic (vector/covector 공용)."""
+
+    def __init__(self, channels=(8, 16, 16, 8)):
+        super().__init__()
+        self.blocks = nn.ModuleList([
+            LNLinearAndGramGate(channels[i], channels[i + 1])
+            for i in range(len(channels) - 1)
+        ])
+
+    def forward(self, x):
+        for blk in self.blocks:
+            x = blk(x)
+        return x
+
+
+class DualBackbone(nn.Module):
+    """Parallel bracket-branch + gate-branch, merged in a bracket layer.
+
+    Lie Neurons 논문 Appendix C (Fig. 5)의 패턴: 두 병렬 브랜치를 지나온
+    feature를 채널 concat 후 bracket 층에서 혼합한다.  method='vector'는
+    twist bracket, 'covector'는 covector bracket을 사용.
+    """
+
+    def __init__(self, channels=(8, 16, 16, 8), method='vector'):
+        super().__init__()
+        from core.lie_neurons_layers import LNLinearAndLieBracket
+        bracket_block = (
+            (lambda i, o: LNLinearAndLieBracket(i, o, algebra_type='se3'))
+            if method == 'vector' else LNLinearAndCovectorBracket)
+        self.branch_bracket = nn.ModuleList([
+            bracket_block(channels[i], channels[i + 1])
+            for i in range(len(channels) - 1)])
+        self.branch_gate = GateBackbone(channels)
+        self.merge = bracket_block(2 * channels[-1], channels[-1])
+
+    def forward(self, x):
+        xb = x
+        for blk in self.branch_bracket:
+            xb = blk(xb)
+        xg = self.branch_gate(x)
+        return self.merge(torch.cat([xb, xg], dim=1))
+
+
 # --------------------------------------------------------- negative controls
 class NaiveHeadNoKlein(nn.Module):
     """K = Z Z^T without the Klein intertwiner: has the WRONG type — it

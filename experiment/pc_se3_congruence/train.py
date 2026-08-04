@@ -35,6 +35,9 @@ torch.set_default_dtype(torch.float64)
 from experiment.pc_se3_congruence.data_synth import (contact_spring_K,
                                                      sample_clouds, spd_stats)
 from experiment.pc_se3_congruence.encoders import PlueckerEncoder
+from experiment.pc_se3_congruence.metrics import (WANDB_ENTITY, WANDB_PROJECT,
+                                                  block_metrics, f_signal,
+                                                  init_wandb)
 from experiment.pc_se3_congruence.models import ModelB
 from experiment.pc_se3_congruence.se3_utils import (coadjoint, random_SE3,
                                                     scaled_err,
@@ -118,6 +121,12 @@ def run(target, data, args, device, outdir):
 
     model = build_model(args.model_seed, device)
     n_params = sum(q.numel() for q in model.parameters())
+    wb = init_wandb(f'train-{target}', {**vars(args), 'target': target,
+                                        'n_params': n_params,
+                                        'channels': CHANNELS,
+                                        'k_encoder': K_ENCODER},
+                    mode=args.wandb_mode, project=args.wandb_project,
+                    entity=args.wandb_entity)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(
         opt, T_max=args.epochs, eta_min=args.lr * 0.01)
@@ -147,15 +156,20 @@ def run(target, data, args, device, outdir):
 
         model.eval()
         with torch.no_grad():
-            d_va, _ = affine_invariant_d(L_va, model(P_va))
-            lam = torch.linalg.eigvalsh(model(P_va[:64]))
+            K_va_pred = model(P_va)
+            d_va, _ = affine_invariant_d(L_va, K_va_pred)
+        diag = block_metrics(K_va_pred, K_va)
+        diag['f_signal'] = f_signal(model, P_va[:64], slice(3, 6))  # [v; w]
         model.train()
         hist['train_d'].append(tot / nb)
         hist['val_d'].append(d_va.mean().item())
         hist['lr'].append(sched.get_last_lr()[0])
-        hist['lam_min'].append(lam[:, 0].median().item())
-        hist['lam_max'].append(lam[:, -1].median().item())
+        hist['lam_min'].append(diag['lam_min'])
+        hist['lam_max'].append(diag['lam_max'])
         hist['clamped'].append(ncl)
+        if wb:
+            wb.log({'train_d': hist['train_d'][-1], 'val_d': hist['val_d'][-1],
+                    'lr': hist['lr'][-1], 'clamped': ncl, **diag}, step=ep)
         if ep % max(1, args.epochs // 20) == 0 or ep == args.epochs - 1:
             print(f'[{target}] ep {ep:4d}  train d {hist["train_d"][-1]:.4f}  '
                   f'val d {hist["val_d"][-1]:.4f}  clamped {ncl}', flush=True)
@@ -173,6 +187,20 @@ def run(target, data, args, device, outdir):
     }
     (outdir / f'{target}_results.json').write_text(json.dumps(out, indent=2))
     torch.save(model.state_dict(), outdir / f'{target}_model.pt')
+    if wb:
+        # 스칼라 요약만 — 체크포인트/json은 로컬 유지 (wandb 업로드 금지)
+        wb.summary.update({
+            'final_train_d': hist['train_d'][-1],
+            'final_val_d': hist['val_d'][-1],
+            'first_epoch_d': hist['train_d'][0],
+            'runtime_s': runtime,
+            'equiv_err_init': checks['init']['equiv_err'],
+            'equiv_err_final': checks['final']['equiv_err'],
+            'loss_inv_err_final': checks['final']['loss_invariance_err'],
+            'gt_lam_min_train': gt_stats['train']['lam_min'],
+            'gt_cond_median_train': gt_stats['train']['cond_median'],
+        })
+        wb.finish()
     print(f'[{target}] done in {runtime:.1f}s  '
           f'train d {hist["train_d"][0]:.3f} -> {hist["train_d"][-1]:.4f}  '
           f'equiv {checks["final"]["equiv_err"]:.2e}')
@@ -219,6 +247,10 @@ def main():
     ap.add_argument('--device', default='cuda')
     ap.add_argument('--outdir',
                     default='experiment/pc_se3_congruence/train_results')
+    ap.add_argument('--wandb-mode', default='online',
+                    choices=['online', 'offline', 'disabled'])
+    ap.add_argument('--wandb-project', default=WANDB_PROJECT)
+    ap.add_argument('--wandb-entity', default=WANDB_ENTITY)
     ap.add_argument('--quick', action='store_true')
     args = ap.parse_args()
     if args.quick:

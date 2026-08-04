@@ -40,6 +40,97 @@ def sample_clouds(n_samples, n_points, gen=None, dtype=torch.float64,
     return P @ R.transpose(-1, -2) + p
 
 
+def symmetric_clouds(n_samples, n_points, gen=None, dtype=torch.float64,
+                     eta=0.0, aniso=(0.5, 2.0), trans_scale=0.0):
+    """Centro-symmetric adversarial clouds: P = {±a_i} + eta * asymmetry.
+
+    Diagnostic benchmark for the bracket-only blockage
+    (bracket_blockage_analysis.md §3.3.4): at eta = 0 every point has an exact
+    antipode, so the encoder's f-channels (mean rank-c kNN differences) vanish
+    IDENTICALLY.  By the rank-collapse theorem any LNLinear + covector-bracket
+    (+ invariant-gating) model then outputs K_ff = 0, K_fm = 0, rank(K) <= 3 —
+    while contact_spring_K targets are rank-6 SPD with O(1) ff-blocks.
+    Regression is provably impossible; eta > 0 interpolates the difficulty
+    (f-channels scale ~ eta, so the model's ff-side is noise-limited).
+
+    n_points must be even (antipodal pairs).  trans_scale shifts the symmetry
+    center away from the origin; the collapse persists (f-channels are
+    translation-invariant), which is itself a useful sanity check.
+    """
+    assert n_points % 2 == 0, 'centro-symmetric cloud needs an even n_points'
+    half = n_points // 2
+    z = torch.randn(n_samples, half, 3, generator=gen, dtype=dtype)
+    lo, hi = aniso
+    s = lo + (hi - lo) * torch.rand(n_samples, 1, 3, generator=gen, dtype=dtype)
+    a = z * s
+    P = torch.cat([a, -a], dim=1)                                # exact antipodes
+    if eta > 0:
+        P = P + eta * torch.randn(P.shape, generator=gen, dtype=dtype)
+    R = torch.stack([random_SO3(gen, dtype) for _ in range(n_samples)])
+    p = torch.randn(n_samples, 1, 3, generator=gen, dtype=dtype) * trans_scale
+    return P @ R.transpose(-1, -2) + p
+
+
+def c2_clouds(n_samples, n_points, gen=None, dtype=torch.float64,
+              eta=0.0, aniso=(0.5, 2.0), trans_scale=0.0):
+    """Clouds with a single C2 (180-deg) symmetry axis + eta * asymmetry.
+
+    NOT centro-symmetric.  By the fixed-subspace lemma
+    (bracket_blockage_analysis.md §6.5a) the encoder's f-channels are confined
+    to the (pose-rotated) axis, so any bracket-only model has
+    rank(K_ff) <= 1 at eta = 0 — while contact-spring targets have rank 3.
+    """
+    assert n_points % 2 == 0
+    half = n_points // 2
+    z = torch.randn(n_samples, half, 3, generator=gen, dtype=dtype)
+    lo, hi = aniso
+    s = lo + (hi - lo) * torch.rand(n_samples, 1, 3, generator=gen, dtype=dtype)
+    a = z * s
+    C2 = torch.diag(torch.tensor([-1., -1., 1.], dtype=dtype))   # 180 deg about z
+    P = torch.cat([a, a @ C2.T], dim=1)
+    if eta > 0:
+        P = P + eta * torch.randn(P.shape, generator=gen, dtype=dtype)
+    R = torch.stack([random_SO3(gen, dtype) for _ in range(n_samples)])
+    p = torch.randn(n_samples, 1, 3, generator=gen, dtype=dtype) * trans_scale
+    return P @ R.transpose(-1, -2) + p
+
+
+_A4 = None
+
+
+def _a4_group(dtype):
+    """The 12 rotations of the tetrahedral group A4 (no -I: not centro-sym)."""
+    global _A4
+    if _A4 is None:
+        perms = [torch.eye(3), torch.tensor([[0., 1, 0], [0, 0, 1], [1, 0, 0]]),
+                 torch.tensor([[0., 0, 1], [1, 0, 0], [0, 1, 0]])]
+        signs = [torch.diag(torch.tensor(s)) for s in
+                 ([1., 1, 1], [1., -1, -1], [-1., 1, -1], [-1., -1, 1])]
+        _A4 = [pm @ sg for pm in perms for sg in signs]
+    return [g.to(dtype) for g in _A4]
+
+
+def tetra_orbit_clouds(n_samples, n_points, gen=None, dtype=torch.float64,
+                       eta=0.0, trans_scale=0.0):
+    """A4-orbit clouds (tetrahedral rotation symmetry, no -I).
+
+    Fix(A4) = {0}, so in exact arithmetic all f-channels would vanish; in
+    practice symmetric orbits create structural kNN distance ties, so f_c is
+    determined by tie-breaking noise (~10x suppressed).  See §6.5a caveat.
+    n_points must be a multiple of 12.
+    """
+    assert n_points % 12 == 0
+    m = n_points // 12
+    G = _a4_group(dtype)
+    b = torch.randn(n_samples, m, 3, generator=gen, dtype=dtype)
+    P = torch.cat([b @ Rm.T for Rm in G], dim=1)
+    if eta > 0:
+        P = P + eta * torch.randn(P.shape, generator=gen, dtype=dtype)
+    R = torch.stack([random_SO3(gen, dtype) for _ in range(n_samples)])
+    p = torch.randn(n_samples, 1, 3, generator=gen, dtype=dtype) * trans_scale
+    return P @ R.transpose(-1, -2) + p
+
+
 def contact_spring_K(P, k=12, sigma_k=0.5):
     """Analytic congruence-equivariant SPD target, [S, 6, 6] in [f; m] order.
 
