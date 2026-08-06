@@ -42,7 +42,10 @@ def f_signal(model, P, direction_slots):
     """
     with torch.no_grad():
         W = model.encoder(P)
-    return W[:, :, direction_slots, 0].norm(dim=-1).mean().item()
+    # Works for both globally pooled [B,C,6,1] encoders and late-pooling
+    # [B,C,6,N/E] encoders.  Norm is over the physical 3-vector slot; all
+    # channel/point/edge instances are then averaged.
+    return W[:, :, direction_slots, :].norm(dim=2).mean().item()
 
 
 def init_wandb(name, config, mode='online',

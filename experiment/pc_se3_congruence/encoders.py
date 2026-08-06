@@ -27,6 +27,28 @@ def knn_indices(P, k):
     return d.topk(k, dim=-1, largest=False).indices
 
 
+def compact_wendland_weights(sqdist, candidate_dim=-1, eps=1e-12):
+    """Smooth compact kernel whose support ends at the outer candidate.
+
+    ``sqdist`` contains distances to a fixed number of nearest candidates.
+    Let ``r`` be the farthest candidate distance.  We use the C2 Wendland
+    window
+
+        phi(q) = (1 - q)^4 (1 + 4 q),  0 <= q < 1,
+                 0,                     q >= 1,
+
+    where ``q = distance / r``.  The farthest selected edge therefore has
+    exactly zero weight.  If an equal-distance shell straddles the candidate
+    boundary, every edge on that shell also has zero weight, so arbitrary
+    top-k tie breaking cannot change the tensor sum.  Near-boundary swaps are
+    suppressed smoothly rather than producing an O(1) jump.
+    """
+    cutoff_sq = sqdist.amax(dim=candidate_dim, keepdim=True)
+    q = torch.sqrt(sqdist / cutoff_sq.clamp_min(eps))
+    one_minus_q = (1.0 - q).clamp_min(0.0)
+    return one_minus_q.pow(4) * (1.0 + 4.0 * q)
+
+
 # ------------------------------------------------------- (1) Pluecker encoder
 class PlueckerEncoder(nn.Module):
     """Closed-form pairwise lifting.  Channel c = rank-c nearest neighbor
@@ -232,6 +254,61 @@ class WrenchLearnableLiftEncoder(nn.Module):
                            torch.einsum('bij,bcj->bci', ch, W[:, :, 0:3])],
                           dim=-1)
         return W.unsqueeze(-1)                                # [B, C, 6, 1]
+
+
+class WrenchEdgeEncoder(nn.Module):
+    """Keep every pure-force wrench until the final tensor pooling.
+
+    Unlike :class:`WrenchPlueckerEncoder`, this encoder does *not* average the
+    point dimension into global vector channels.  Its output has the standard
+    Lie-Neuron layout ``[B, C, 6, M]``:
+
+    - ``graph='knn'``: ``C=k`` neighbor ranks and ``M=N`` anchor points.  A
+      second-moment head is invariant to permutations of the k channels, but a
+      tie cut by the k-th-neighbor boundary can still change the selected set.
+    - ``graph='kernel'``: ``C=min(candidate_k,N-1)`` local candidates and
+      ``M=N`` anchors.  The second-moment head applies a compact kernel that
+      is zero at the outer candidate, removing the hard boundary jump while
+      retaining bounded local storage.
+    - ``graph='all'``: ``C=1`` and ``M=N(N-1)`` directed edges.  There is no
+      neighbor ranking or boundary, so exact distance ties are harmless.
+
+    Wrenches are stored as ``[f; m]`` with ``f=r_j-r_i`` and
+    ``m=r_i x f`` and therefore transform by ``Ad_T^{-T}``.
+    """
+
+    def __init__(self, k=8, graph='knn', candidate_k=None):
+        super().__init__()
+        if graph not in ('knn', 'kernel', 'all'):
+            raise ValueError(
+                f"unknown graph={graph!r}; expected 'knn', 'kernel', or 'all'")
+        self.k = k
+        self.graph = graph
+        self.candidate_k = candidate_k if candidate_k is not None else 4 * k
+
+    def forward(self, P):
+        """P: [B, N, 3] -> W: [B, k, 6, N] or [B, 1, 6, N(N-1)]."""
+        B, N, _ = P.shape
+        if self.graph in ('knn', 'kernel'):
+            edge_k = self.k if self.graph == 'knn' else self.candidate_k
+            edge_k = min(edge_k, N - 1)
+            idx = knn_indices(P, edge_k)
+            nbr = torch.gather(
+                P.unsqueeze(2).expand(B, N, edge_k, 3), 1,
+                idx.unsqueeze(-1).expand(B, N, edge_k, 3))
+            f = nbr - P.unsqueeze(2)                          # [B, N, K, 3]
+            m = torch.cross(P.unsqueeze(2).expand_as(f), f, dim=-1)
+            return torch.cat([f, m], dim=-1).permute(0, 2, 3, 1)
+
+        # All ordered pairs i != j.  The edge order may change under a point
+        # permutation, but the second-moment sum in the head is order-free.
+        f = P.unsqueeze(1) - P.unsqueeze(2)                   # [B, N_i, N_j, 3]
+        mask = ~torch.eye(N, dtype=torch.bool, device=P.device)
+        f = f[:, mask].reshape(B, N * (N - 1), 3)
+        r = P.unsqueeze(2).expand(B, N, N, 3)
+        r = r[:, mask].reshape(B, N * (N - 1), 3)
+        m = torch.cross(r, f, dim=-1)
+        return torch.cat([f, m], dim=-1).transpose(1, 2).unsqueeze(1)
 
 class BracketPlueckerEncoder(nn.Module):
     """Wrench Pluecker lift + PRE-POOLING covector-bracket channels (design A).

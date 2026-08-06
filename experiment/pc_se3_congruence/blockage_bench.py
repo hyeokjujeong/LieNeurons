@@ -21,6 +21,16 @@ channel signal |f_c|, eigenvalue clamp count.
 Examples:
   python experiment/pc_se3_congruence/blockage_bench.py --dataset centro --eta 0.0
   python experiment/pc_se3_congruence/blockage_bench.py --dataset iid --n-points 512
+  # Does a learnable VN lift remove tetrahedral kNN tie instability?
+  python experiment/pc_se3_congruence/blockage_bench.py --dataset tetra \
+      --encoder learnable --method covector
+  # Tie-robust second-order model and matching all-pairs target
+  python experiment/pc_se3_congruence/blockage_bench.py --dataset c2 \
+      --encoder tensor --method covector --tensor-graph all --target-graph all
+  # Local compact-kernel second moment (bounded edge storage, robust boundary)
+  python experiment/pc_se3_congruence/blockage_bench.py --dataset c2 \
+      --encoder tensor --method covector --tensor-graph kernel \
+      --target-graph kernel --kernel-candidates 32
   python experiment/pc_se3_congruence/blockage_bench.py --suite            # 표준 그리드
   python experiment/pc_se3_congruence/blockage_bench.py --dataset fiber   # 학습 없음
   ... --wandb-mode disabled  (wandb 없이 stdout만)
@@ -35,19 +45,25 @@ import torch
 torch.set_default_dtype(torch.float64)
 
 from experiment.pc_se3_congruence.data_synth import (c2_clouds,
+                                                     contact_spring_all_pairs_K,
                                                      contact_spring_K,
+                                                     contact_spring_kernel_K,
                                                      sample_clouds,
                                                      symmetric_clouds,
                                                      tetra_orbit_clouds)
 from experiment.pc_se3_congruence.encoders import (BracketPlueckerEncoder,
+                                                   LearnableLiftEncoder,
                                                    PlueckerEncoder,
+                                                   WrenchEdgeEncoder,
+                                                   WrenchLearnableLiftEncoder,
                                                    WrenchPlueckerEncoder)
 from experiment.pc_se3_congruence.metrics import (WANDB_ENTITY,
                                                      WANDB_PROJECT,
                                                      block_metrics, f_signal,
                                                      init_wandb)
 from experiment.pc_se3_congruence.models import (DualBackbone, GateBackbone,
-                                                   ModelB, ModelPC2K)
+                                                   ModelB, ModelPC2K,
+                                                   WrenchSecondMomentModel)
 from experiment.pc_se3_congruence.train import EIG_CLAMP, affine_invariant_d
 
 DATASETS = {
@@ -60,9 +76,27 @@ DATASETS = {
 
 # ----------------------------------------------------------------- training
 def build_model(method, seed, k, channels, nonlinear='bracket',
-                encoder='plueck'):
+                encoder='plueck', lift_hidden=8, tensor_graph='all',
+                tensor_weight='learned', tensor_hidden=32, sigma_k=0.5,
+                kernel_candidates=None):
     torch.manual_seed(seed)
-    if encoder == 'bracket':
+    if encoder == 'tensor':
+        assert method == 'covector', 'encoder=tensor는 covector method로 실행'
+        enc = WrenchEdgeEncoder(k=k, graph=tensor_graph,
+                                candidate_k=kernel_candidates)
+        model = WrenchSecondMomentModel(
+            enc, weight_mode=tensor_weight, sigma=sigma_k,
+            hidden=tensor_hidden)
+    elif encoder == 'learnable':
+        if method == 'covector':
+            enc = WrenchLearnableLiftEncoder(
+                out_channels=channels[0], hidden=lift_hidden, k=k)
+            model = ModelPC2K(enc, channels=channels)
+        else:
+            enc = LearnableLiftEncoder(
+                out_channels=channels[0], hidden=lift_hidden, k=k)
+            model = ModelB(enc, channels=channels)
+    elif encoder == 'bracket':
         assert method == 'covector', 'encoder=bracket은 covector method로 실행'
         enc = BracketPlueckerEncoder(k=k)
         if channels[0] != enc.out_channels:
@@ -73,16 +107,16 @@ def build_model(method, seed, k, channels, nonlinear='bracket',
         model = ModelPC2K(WrenchPlueckerEncoder(k=k), channels=channels)
     else:
         model = ModelB(PlueckerEncoder(k=k), channels=channels)
-    if nonlinear == 'gate':
+    if encoder != 'tensor' and nonlinear == 'gate':
         model.backbone = GateBackbone(channels)
-    elif nonlinear == 'dual':
+    elif encoder != 'tensor' and nonlinear == 'dual':
         model.backbone = DualBackbone(channels, method=method)
     return model
 
 
 def forward_K(method, model, P):
     out = model(P)
-    return out[1] if method == 'covector' else out
+    return out[1] if isinstance(out, tuple) else out
 
 
 def equiv_check(args, model, P, n_T=3):
@@ -111,7 +145,21 @@ def run_training(args, wb):
     P = make(n_total, args.n_points, gen, eta=args.eta) \
         if args.dataset != 'iid' else make(n_total, args.n_points, gen)
     P = P.to(args.device)
-    K_gt = contact_spring_K(P, k=args.k_gt, sigma_k=args.sigma_k)
+    if args.target_graph == 'all':
+        target_fn = lambda x: contact_spring_all_pairs_K(
+            x, sigma_k=args.sigma_k)
+    elif args.target_graph == 'kernel':
+        target_fn = lambda x: contact_spring_kernel_K(
+            x, candidate_k=args.kernel_candidates, sigma_k=args.sigma_k)
+    else:
+        target_fn = lambda x: contact_spring_K(
+            x, k=args.k_gt, sigma_k=args.sigma_k)
+    # All-pairs tensors are deliberately evaluated in chunks: a full recipe
+    # otherwise materializes [4096,128,128,...] intermediates at once.
+    K_gt = torch.cat([
+        target_fn(P[i:i + args.target_batch])
+        for i in range(0, P.shape[0], args.target_batch)
+    ])
     L_gt = torch.linalg.cholesky(K_gt)
     P_tr, P_va = P[:args.n_train], P[args.n_train:]
     L_tr, L_va = L_gt[:args.n_train], L_gt[args.n_train:]
@@ -119,49 +167,61 @@ def run_training(args, wb):
 
     model = build_model(args.method, args.model_seed, args.k_enc,
                         tuple(args.channels), args.nonlinear,
-                        args.encoder).to(args.device)
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(
-        opt, T_max=args.epochs, eta_min=args.lr * 0.01)
+                        args.encoder, args.lift_hidden, args.tensor_graph,
+                        args.tensor_weight, args.tensor_hidden,
+                        args.sigma_k, args.kernel_candidates).to(args.device)
+    trainable = [q for q in model.parameters() if q.requires_grad]
+    opt = torch.optim.Adam(trainable, lr=args.lr) if trainable else None
+    epochs = args.epochs if opt is not None else 1
+    sched = (torch.optim.lr_scheduler.CosineAnnealingLR(
+        opt, T_max=epochs, eta_min=args.lr * 0.01)
+        if opt is not None else None)
+    if opt is None:
+        print(f'[encoder={args.encoder}, weight={args.tensor_weight}] '
+              '학습 파라미터가 없어 1회 구조 평가만 수행')
 
     eq0 = equiv_check(args, model, P_va[:32])
     print(f'학습 전 equivariance: {eq0:.2e}')
     if wb: wb.summary['equiv_err_init'] = eq0
 
-    if args.dataset == 'centro' and args.eta == 0.0:
+    if (args.dataset == 'centro' and args.eta == 0.0
+            and args.encoder != 'tensor'):
         floor = (3 ** 0.5) * abs(torch.log(torch.tensor(EIG_CLAMP)).item())
         print(f'[centro eta=0] 해석적 하한: d >= {floor:.2f}')
         if wb: wb.summary['analytic_floor_d'] = floor
 
     S = P_tr.shape[0]
     gp = torch.Generator().manual_seed(args.data_seed + 1)
-    for ep in range(args.epochs):
+    for ep in range(epochs):
         perm = torch.randperm(S, generator=gp)
         tot, nb, ncl = 0.0, 0, 0
         for b in range(0, S, args.batch):
             i = perm[b:b + args.batch]
             d, n_c = affine_invariant_d(L_tr[i], forward_K(args.method, model, P_tr[i]))
             loss = d.mean()
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
+            if opt is not None:
+                opt.zero_grad(set_to_none=True)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                opt.step()
             tot, nb, ncl = tot + loss.item(), nb + 1, ncl + n_c
-        sched.step()
+        if sched is not None:
+            sched.step()
 
         model.eval()
         with torch.no_grad():
             K_pred = forward_K(args.method, model, P_va)
             d_va, _ = affine_invariant_d(L_va, K_pred)
         log = {'train_d': tot / nb, 'val_d': d_va.mean().item(),
-               'clamped': ncl, 'lr': sched.get_last_lr()[0],
+               'clamped': ncl,
+               'lr': sched.get_last_lr()[0] if sched is not None else 0.0,
                'f_signal': f_signal(model, P_va[:64],
                                     slice(0, 3) if args.method == 'covector'
                                     else slice(3, 6)),   # covector:[f;m] / vector:[v;w]
                **block_metrics(K_pred, K_va)}
         model.train()
         if wb: wb.log(log, step=ep)
-        if ep % max(1, args.epochs // 10) == 0 or ep == args.epochs - 1:
+        if ep % max(1, epochs // 10) == 0 or ep == epochs - 1:
             print(f'ep {ep:4d}  train d {log["train_d"]:8.3f}  '
                   f'val d {log["val_d"]:8.3f}  ff {log["err_rel_ff"]:.3f}  '
                   f'mm {log["err_rel_mm"]:.3f}  rank {log["rank_pred"]:.1f}  '
@@ -192,7 +252,9 @@ def run_fiber(args, wb):
 
     model = build_model(args.method, args.model_seed, args.k_enc,
                         tuple(args.channels), args.nonlinear,
-                        args.encoder).to(args.device).eval()
+                        args.encoder, args.lift_hidden, args.tensor_graph,
+                        args.tensor_weight, args.tensor_hidden,
+                        args.sigma_k, args.kernel_candidates).to(args.device).eval()
     with torch.no_grad():
         Kp0 = forward_K(args.method, model, P0)
         Kp1 = forward_K(args.method, model, P1)
@@ -234,8 +296,9 @@ def main():
     ap.add_argument('--dataset', default='centro',
                     choices=list(DATASETS) + ['fiber'])
     ap.add_argument('--encoder', default='plueck',
-                    choices=['plueck', 'bracket'],
-                    help='bracket: pooling-전 bracket 채널 추가 (2k-1 channels, covector 전용)')
+                    choices=['plueck', 'learnable', 'bracket', 'tensor'],
+                    help=('plueck: 기존 global mean / learnable: VN lift 뒤 global mean / '
+                          'bracket: pooling-전 bracket / tensor: edge를 유지해 ww^T late pooling'))
     ap.add_argument('--nonlinear', default='bracket',
                     choices=['bracket', 'gate', 'dual'],
                     help='백본 비선형성: bracket(기존) / gate(Gram gate로 교체) / dual(병렬 두 브랜치+bracket 병합)')
@@ -251,6 +314,26 @@ def main():
     ap.add_argument('--k-enc', type=int, default=8)
     ap.add_argument('--k-gt', type=int, default=8)
     ap.add_argument('--sigma-k', type=float, default=0.5)
+    ap.add_argument('--target-graph', default='knn',
+                    choices=['knn', 'kernel', 'all'],
+                    help=('GT contact spring graph; kernel은 local compact window, '
+                          'all은 exact-tie 대조군'))
+    ap.add_argument('--target-batch', type=int, default=64,
+                    help='GT 생성 chunk 크기 (all-pairs 메모리 제어)')
+    ap.add_argument('--lift-hidden', type=int, default=8,
+                    help='learnable VN lift의 hidden channel 수')
+    ap.add_argument('--tensor-graph', default='all',
+                    choices=['knn', 'kernel', 'all'],
+                    help=('tensor edge graph; kernel은 bounded local 후보와 '
+                          'smooth zero-boundary window 사용'))
+    ap.add_argument('--kernel-candidates', type=int, default=None,
+                    help=('kernel graph의 최대 local 후보 수; 기본값은 4*k-enc. '
+                          'N-1보다 크면 자동으로 줄임'))
+    ap.add_argument('--tensor-weight', default='learned',
+                    choices=['learned', 'analytic', 'uniform'],
+                    help='2차 pooling의 invariant radial weight')
+    ap.add_argument('--tensor-hidden', type=int, default=32,
+                    help='learned tensor radial MLP hidden channel 수')
     ap.add_argument('--channels', type=int, nargs='+', default=[8, 32, 32, 16])
     ap.add_argument('--data-seed', type=int, default=100)
     ap.add_argument('--model-seed', type=int, default=0)
@@ -265,6 +348,10 @@ def main():
     ap.add_argument('--quick', action='store_true')
     ap.set_defaults(**RECIPES[pre_args.recipe])
     args = ap.parse_args()
+    if args.kernel_candidates is None:
+        args.kernel_candidates = 4 * args.k_enc
+    if args.kernel_candidates < 2:
+        ap.error('--kernel-candidates는 2 이상이어야 합니다')
     if args.quick:
         args.epochs, args.n_train, args.n_val = 10, 128, 64
 
@@ -282,12 +369,21 @@ def main():
 
 
 def one(args):
+    if args.encoder == 'tensor':
+        if args.method != 'covector':
+            raise ValueError('--encoder tensor에는 --method covector가 필요합니다')
+        if args.nonlinear != 'bracket':
+            raise ValueError('tensor 모델은 별도 backbone이 없으므로 --nonlinear bracket을 사용하세요')
     if args.dataset == 'tetra' and args.n_points % 12 != 0:
         adj = max(12, args.n_points // 12 * 12)
         print(f'[tetra] n_points {args.n_points} -> {adj} (12의 배수 보정)')
         args.n_points = adj
     tag = (f'{args.dataset}-{args.method}-{args.nonlinear}-{args.recipe}'
-           + ('-brenc' if args.encoder == 'bracket' else '')
+           + (f'-{args.encoder}' if args.encoder != 'plueck' else '')
+           + (f'-{args.tensor_graph}-{args.tensor_weight}'
+              if args.encoder == 'tensor' else '')
+           + (f'-target-{args.target_graph}'
+              if args.target_graph != 'knn' else '')
            + (f'-eta{args.eta}' if args.dataset != 'iid' else
               f'-N{args.n_points}'))
     wb = init_wandb(tag, vars(args), mode=args.wandb_mode,

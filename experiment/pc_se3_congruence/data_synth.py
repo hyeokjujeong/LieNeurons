@@ -24,7 +24,8 @@ exact there but loses precision for ||p|| >~ 1e2 (log/inv-sqrt conditioning).
 """
 import torch
 
-from experiment.pc_se3_congruence.encoders import knn_indices
+from experiment.pc_se3_congruence.encoders import (compact_wendland_weights,
+                                                   knn_indices)
 from experiment.pc_se3_congruence.se3_utils import random_SO3
 
 
@@ -146,6 +147,52 @@ def contact_spring_K(P, k=12, sigma_k=0.5):
     w = torch.cat([d, m], dim=-1)                                # [S, N, k, 6]
     kw = torch.exp(-(d * d).sum(-1) / (2.0 * sigma_k ** 2))      # [S, N, k]
     K = torch.einsum('snk,snki,snkj->sij', kw, w, w) / (N * k)
+    return 0.5 * (K + K.transpose(-1, -2))
+
+
+def contact_spring_all_pairs_K(P, sigma_k=0.5):
+    """Tie-robust all-pairs version of :func:`contact_spring_K`.
+
+    Every ordered pair ``i != j`` contributes, so there is no kNN rank or
+    k-th-neighbor boundary to become ambiguous on an exactly symmetric cloud.
+    This target is permutation invariant and congruence equivariant even when
+    many pairwise distances are exactly equal.
+    """
+    S, N, _ = P.shape
+    d = P.unsqueeze(1) - P.unsqueeze(2)                       # r_j - r_i
+    r = P.unsqueeze(2).expand(S, N, N, 3)
+    mask = ~torch.eye(N, dtype=torch.bool, device=P.device)
+    d = d[:, mask].reshape(S, N * (N - 1), 3)
+    r = r[:, mask].reshape(S, N * (N - 1), 3)
+    m = torch.cross(r, d, dim=-1)
+    w = torch.cat([d, m], dim=-1)
+    kw = torch.exp(-d.square().sum(-1) / (2.0 * sigma_k ** 2))
+    K = torch.einsum('se,sei,sej->sij', kw, w, w) / (N * (N - 1))
+    return 0.5 * (K + K.transpose(-1, -2))
+
+
+def contact_spring_kernel_K(P, candidate_k=32, sigma_k=0.5):
+    """Local, boundary-robust contact-spring target.
+
+    Only ``candidate_k`` nearest edges per anchor are materialized.  Their
+    analytic radial spring weight is multiplied by a compact Wendland window
+    that reaches zero at the farthest candidate.  Consequently an exact
+    distance shell cut by the candidate boundary contributes zero on both
+    sides, while the stored edge count remains O(N * candidate_k).
+    """
+    S, N, _ = P.shape
+    edge_k = min(candidate_k, N - 1)
+    idx = knn_indices(P, edge_k)
+    nbr = torch.gather(P.unsqueeze(2).expand(S, N, edge_k, 3), 1,
+                       idx.unsqueeze(-1).expand(S, N, edge_k, 3))
+    d = nbr - P.unsqueeze(2)
+    m = torch.cross(P.unsqueeze(2).expand_as(d), d, dim=-1)
+    w = torch.cat([d, m], dim=-1)
+    sqdist = d.square().sum(-1)
+    radial = torch.exp(-sqdist / (2.0 * sigma_k ** 2))
+    window = compact_wendland_weights(sqdist, candidate_dim=-1)
+    kw = radial * window
+    K = torch.einsum('snk,snki,snkj->sij', kw, w, w) / (N * edge_k)
     return 0.5 * (K + K.transpose(-1, -2))
 
 

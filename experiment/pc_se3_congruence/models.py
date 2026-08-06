@@ -242,6 +242,76 @@ class ModelPC2K(nn.Module):
         return self.head(self.backbone(self.encoder(P)))
 
 
+class WrenchSecondMomentModel(nn.Module):
+    """Late second-order pooling of point/edge wrench features.
+
+    For edge wrenches ``W=[f;m]`` transforming by ``A=Ad_T^{-T}``, form
+
+        K = (1 / E) sum_e alpha(||f_e||^2) W_e W_e^T.
+
+    The scalar weight is invariant, hence ``K(T.P)=A K(P) A^T``.  Signs and
+    permutations of symmetry-related edges disappear in the outer-product
+    sum, so no global equivariant vector or canonical neighbor has to be
+    selected.  The result is PSD; it is SPD exactly when the positively
+    weighted wrenches span R^6.
+
+    ``weight_mode``:
+      learned  positive radial MLP (the trainable experiment)
+      analytic exp(-||f||^2/(2 sigma^2)), matching the all-pair/kNN target
+      uniform  structural rank/equivariance diagnostic with alpha=1
+    """
+
+    def __init__(self, encoder, weight_mode='learned', sigma=0.5,
+                 hidden=32):
+        super().__init__()
+        if weight_mode not in ('learned', 'analytic', 'uniform'):
+            raise ValueError('weight_mode must be learned, analytic, or uniform')
+        self.encoder = encoder
+        self.weight_mode = weight_mode
+        self.sigma = sigma
+        if weight_mode == 'learned':
+            self.weight_net = nn.Sequential(
+                nn.Linear(1, hidden), nn.Tanh(),
+                nn.Linear(hidden, hidden), nn.Tanh(),
+                nn.Linear(hidden, 1))
+            # Start from the benign radial kernel exp(-||f||^2), without
+            # leaking the target sigma.  The network learns a positive local
+            # inverse length scale; zeroing the last weight makes initialization
+            # independent of random upstream activations.
+            last = self.weight_net[-1]
+            nn.init.zeros_(last.weight)
+            nn.init.constant_(last.bias,
+                              torch.log(torch.expm1(torch.tensor(1.0))).item())
+        else:
+            self.weight_net = None
+
+    def edge_weights(self, sqdist):
+        """sqdist: [B, C, M] -> positive invariant weights of same shape."""
+        if self.weight_mode == 'uniform':
+            return torch.ones_like(sqdist)
+        if self.weight_mode == 'analytic':
+            return torch.exp(-sqdist / (2.0 * self.sigma ** 2))
+        # A positive learned inverse length scale guarantees decay instead of
+        # letting numerous long all-pair edges dominate at initialization.
+        raw = self.weight_net(torch.log1p(sqdist).unsqueeze(-1)).squeeze(-1)
+        rate = torch.nn.functional.softplus(raw) + 1e-12
+        return torch.exp(-rate * sqdist)
+
+    def forward(self, P):
+        W = self.encoder(P)                                  # [B, C, 6, M]
+        sqdist = W[:, :, 0:3].square().sum(dim=2)             # [B, C, M]
+        alpha = self.edge_weights(sqdist)
+        if getattr(self.encoder, 'graph', None) == 'kernel':
+            # Candidate channels are distance ordered for every anchor M.
+            # The compact window is exactly zero at the candidate boundary.
+            from experiment.pc_se3_congruence.encoders import compact_wendland_weights
+            alpha = alpha * compact_wendland_weights(
+                sqdist, candidate_dim=1)
+        K = torch.einsum('bcm,bcim,bcjm->bij', alpha, W, W)
+        K = K / (W.shape[1] * W.shape[-1])
+        return 0.5 * (K + K.transpose(-1, -2))
+
+
 class ModelPC2KNaiveBracket(nn.Module):
     """NEGATIVE CONTROL: same wrench encoder, but the TWIST backbone (ordinary
     se(3) Lie bracket) run on the wrench features.  Equivariant for Ad, not
