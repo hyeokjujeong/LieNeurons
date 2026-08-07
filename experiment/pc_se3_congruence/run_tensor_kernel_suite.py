@@ -31,6 +31,7 @@ def command(args, weight):
         '--tensor-graph', 'kernel',
         '--target-graph', args.target_graph,
         '--tensor-weight', weight,
+        '--tensor-backbone', args.tensor_backbone,
         '--kernel-candidates', str(args.kernel_candidates),
         '--wandb-mode', args.wandb_mode,
     ]
@@ -55,6 +56,9 @@ def main():
     ap.add_argument('--recipe', choices=['toy', 'full'], default='toy')
     ap.add_argument('--quick', action='store_true')
     ap.add_argument('--kernel-candidates', type=int, default=32)
+    ap.add_argument('--tensor-backbone', choices=['none', 'covector'],
+                    default='none',
+                    help='covector이면 second-moment 전에 LN backbone 추가')
     ap.add_argument('--target-graph', choices=['kernel', 'knn', 'all'],
                     default='kernel',
                     help=('kernel=권장 matching smooth target; knn=기존 hard-kNN '

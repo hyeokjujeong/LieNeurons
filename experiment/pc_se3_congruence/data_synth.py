@@ -132,6 +132,32 @@ def tetra_orbit_clouds(n_samples, n_points, gen=None, dtype=torch.float64,
     return P @ R.transpose(-1, -2) + p
 
 
+def lattice_clouds(n_samples, n_side=3, gen=None, dtype=torch.float64,
+                   spacing=1.0, jitter=0.0, trans_scale=0.0):
+    """Cubic-lattice clouds -- the maximally TIE-DEGENERATE benchmark.
+
+    A lattice of side ``n_side`` has huge families of exactly equal pairwise
+    distances, so the identity of the "c-th nearest neighbour" is arbitrary.
+    Any model that uses neighbour RANK as a channel index therefore produces a
+    different answer for two relabellings of the SAME cloud, even though the
+    geometry is identical.  Tie robustness is a strictly different requirement
+    from rank preservation (:func:`symmetric_clouds`, :func:`c2_clouds`), and
+    this generator isolates it.
+
+    ``jitter`` > 0 breaks the ties continuously; the equivariance error of a
+    tie-fragile model as a function of jitter is the near-tie robustness curve.
+    n_points = n_side ** 3.
+    """
+    g = torch.arange(n_side, dtype=dtype) - (n_side - 1) / 2.0
+    grid = torch.stack(torch.meshgrid(g, g, g, indexing='ij'), dim=-1)
+    P = (grid.reshape(1, -1, 3) * spacing).repeat(n_samples, 1, 1)
+    if jitter > 0:
+        P = P + jitter * torch.randn(P.shape, generator=gen, dtype=dtype)
+    R = torch.stack([random_SO3(gen, dtype) for _ in range(n_samples)])
+    p = torch.randn(n_samples, 1, 3, generator=gen, dtype=dtype) * trans_scale
+    return P @ R.transpose(-1, -2) + p
+
+
 def contact_spring_K(P, k=12, sigma_k=0.5):
     """Analytic congruence-equivariant SPD target, [S, 6, 6] in [f; m] order.
 

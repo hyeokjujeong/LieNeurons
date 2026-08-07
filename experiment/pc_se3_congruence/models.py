@@ -262,13 +262,22 @@ class WrenchSecondMomentModel(nn.Module):
     """
 
     def __init__(self, encoder, weight_mode='learned', sigma=0.5,
-                 hidden=32):
+                 hidden=32, backbone_channels=None):
         super().__init__()
         if weight_mode not in ('learned', 'analytic', 'uniform'):
             raise ValueError('weight_mode must be learned, analytic, or uniform')
         self.encoder = encoder
         self.weight_mode = weight_mode
         self.sigma = sigma
+        self.backbone = (CovectorBackbone(backbone_channels)
+                         if backbone_channels is not None else None)
+        if self.backbone is not None:
+            # Start each residual bracket branch at the identity.  Keeping one
+            # direction random and zeroing the other preserves a non-zero
+            # learning signal while avoiding an unstable random quadratic map
+            # before the SPD/AIRM objective has calibrated feature scales.
+            for block in self.backbone.blocks:
+                nn.init.zeros_(block.bracket.learn_dir2.weight)
         if weight_mode == 'learned':
             self.weight_net = nn.Sequential(
                 nn.Linear(1, hidden), nn.Tanh(),
@@ -300,15 +309,50 @@ class WrenchSecondMomentModel(nn.Module):
     def forward(self, P):
         W = self.encoder(P)                                  # [B, C, 6, M]
         sqdist = W[:, :, 0:3].square().sum(dim=2)             # [B, C, M]
-        alpha = self.edge_weights(sqdist)
+        radial_alpha = self.edge_weights(sqdist)
+        compact_alpha = None
         if getattr(self.encoder, 'graph', None) == 'kernel':
             # Candidate channels are distance ordered for every anchor M.
             # The compact window is exactly zero at the candidate boundary.
             from experiment.pc_se3_congruence.encoders import compact_wendland_weights
-            alpha = alpha * compact_wendland_weights(
+            compact_alpha = compact_wendland_weights(
                 sqdist, candidate_dim=1)
-        K = torch.einsum('bcm,bcim,bcjm->bij', alpha, W, W)
-        K = K / (W.shape[1] * W.shape[-1])
+        alpha = (radial_alpha if compact_alpha is None
+                 else radial_alpha * compact_alpha)
+        if self.backbone is None:
+            K = torch.einsum('bcm,bcim,bcjm->bij', alpha, W, W)
+            denom = W.shape[1] * W.shape[-1]
+        else:
+            # Apply the invariant radial/compact weight before channel mixing.
+            # The backbone stays entirely in se(3)*, so every intermediate
+            # feature and the final Gram tensor obey the coadjoint congruence
+            # law.  This is an explicit rank-channel LN ablation; unlike the
+            # no-backbone sum, general channel mixing is not invariant to a
+            # permutation of equal-distance neighbor-rank channels.
+            # Take the two square roots separately.  The compact window is a
+            # fixed graph quantity (no parameter gradient); sqrt(radial*0)
+            # would otherwise create the indeterminate 0*inf gradient at its
+            # exactly-zero boundary.
+            feature_weight = radial_alpha.sqrt()
+            if compact_alpha is not None:
+                feature_weight = feature_weight * compact_alpha.sqrt()
+            X = W * feature_weight.unsqueeze(2)
+            expected_channels = self.backbone.blocks[0].linear.fc.in_features
+            if X.shape[1] < expected_channels:
+                # Small clouds can have N-1 < candidate_k (e.g. N=32,
+                # candidate_k=32).  Zero padding keeps one fixed LN parameter
+                # shape without adding any edge contribution.
+                pad = X.new_zeros(X.shape[0], expected_channels - X.shape[1],
+                                  X.shape[2], X.shape[3])
+                X = torch.cat([X, pad], dim=1)
+            elif X.shape[1] > expected_channels:
+                raise ValueError(
+                    f'LN backbone expects {expected_channels} edge channels, '
+                    f'but encoder produced {X.shape[1]}')
+            Z = self.backbone(X)
+            K = torch.einsum('bcim,bcjm->bij', Z, Z)
+            denom = Z.shape[1] * Z.shape[-1]
+        K = K / denom
         return 0.5 * (K + K.transpose(-1, -2))
 
 

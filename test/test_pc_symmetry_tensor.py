@@ -73,3 +73,20 @@ def test_local_kernel_tensor_is_permutation_invariant_and_equivariant_on_c2():
     transformed = model(transform_cloud(P, R, p))
     expected = rho @ K @ rho.transpose(-1, -2)
     assert scaled_err(transformed, expected) < 1e-11
+
+
+def test_local_kernel_covector_backbone_is_full_rank_and_equivariant_off_ties():
+    gen = torch.Generator().manual_seed(41)
+    P = torch.randn(3, 24, 3, generator=gen, dtype=torch.float64)
+    model = WrenchSecondMomentModel(
+        WrenchEdgeEncoder(graph='kernel', candidate_k=12),
+        weight_mode='learned', backbone_channels=(12, 16, 16, 8)).double()
+
+    K = model(P)
+    assert (torch.linalg.eigvalsh(K)[:, 0] > 1e-12).all()
+
+    R, p = random_SE3(1.0, gen, dtype=torch.float64)
+    rho = coadjoint(R, p)
+    transformed = model(transform_cloud(P, R, p))
+    expected = rho @ K @ rho.transpose(-1, -2)
+    assert scaled_err(transformed, expected) < 1e-11

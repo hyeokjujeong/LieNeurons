@@ -167,6 +167,65 @@ Cross-slot 의존성만 분리한 synthetic target에서 test NMSE는 Klein gate
 3. gate score 분포, saturation 비율, gradient norm을 기록한다.
 4. vector와 covector 구현 중 하나만 주 경로로 선택한다. 수학적 표현력은 같으므로 물리적 입력/출력 타입과 코드 단순성이 선택 기준이다.
 
+## 6.5 Pointwise pipeline (구조 검증 + full GPU 학습 완료)
+
+정식 실험 문서는 `pointwise_pipeline.md`이고 아래는 요약이다. 요지는 **neighbor 축
+$k$를 backbone 이전에 learned set aggregation으로 없애고, point 축 $N$은 second
+moment 직전까지 유지**하는 것이다.
+
+$$
+P\to W^{\mathrm{edge}}[N,k,6]\to X^{(0)}[N,C_0,6]
+\to\text{LN-Linear/covector bracket/Klein gate}\to Z[N,H,6]\to\mathbf K .
+$$
+
+$N$을 유지하면 대칭이 factor를 *고정*하는 대신 *permutation*할 수 있다
+($L(T\!\cdot\!P)=A_TL(P)(\Pi_T\otimes I_H)$, orthogonal gauge는 Gram에서 소거).
+Global vector pooling이 centro/$C_2$에서 rank를 무너뜨린 이유가 이 gauge의 상실이다.
+
+확인된 것 (`run_pointwise_gpu_experiments.sh`: Phase 1 구조 검증 + Phase 2–3 full 학습
+18 run, CUDA·float64·150 epoch·4096 샘플, 2026-08-07):
+
+- iid/centro/c2/tetra 전부 equivariance $\le1.7\times10^{-15}$,
+  permutation $\le6.0\times10^{-16}$, rank 6, $\lambda_{\min}\sim10^{-3}$,
+  `graph_truncation_frac` 0. 15개 아키텍처 변형 전부 동일.
+- **tie 실패의 원인 규명.** 정육면체 격자에서 pointwise 모델의 permutation 오차는
+  3.0e-16, rank-channel 모델(`WrenchSecondMomentModel` + LN backbone)은 1.9e-01이다.
+  jitter $10^{-8}$로 tie를 깨면 후자도 즉시 회복된다. 즉 원인은 compact kernel이나
+  adaptive radius가 아니라 **neighbor rank를 channel index로 쓴 것**이며,
+  `knn_adaptive` radius를 쓴 pointwise 모델도 격자에서 machine precision을 유지한다.
+- **Realizability.** 같은 클래스의 고정 난수 teacher 타깃에서 표준 suite 9 케이스
+  (centro $\eta\in\{0,0.02,0.1,0.5\}$, $C_2$, tetra, iid $N\in\{32,128,512\}$) 전부
+  val $d\le1.5\times10^{-3}$, ff/mm 블록 상대오차 $\le5.5\times10^{-4}$, train≈val.
+  대칭 데이터셋과 iid의 수렴값이 구별되지 않는다.
+- **학습 18 run 전부에서 rank 6, `clamped`$=0$, `equiv_err_final`$\le8.9\times10^{-15}$.**
+  gradient step이 구조를 훼손하지 않는다.
+- **Analytic(`kernel`) 타깃은 val $d$ 0.297–1.718에서 평탄화한다.** ep30 이후 거의
+  움직이지 않고 train/val이 붙어 있으므로 과적합도 학습 부족도 아닌 **모델 클래스
+  불일치의 바닥**이다 (아래 참조). iid에서 $N=32/128/512$에 대해 1.718/0.708/0.297로
+  단조 감소한다.
+- **Encoder는 학습 파라미터가 0개다.** $k\to C_0$ 축약을 학습된 MLP 대신 고정 거리
+  shell $\rho_c(q_{ij})$로 하고 shell별 정규화만 남기면(`--pw-pool basis_mean`, 기본값)
+  가중치 MLP가 불필요하다 — 뒤따르는 LN-Linear가 $\mathrm{span}\{\rho_c\}$ 안의 임의
+  radial kernel을 복원하기 때문이다. 같은 논리로 encoder bracket도 block 0의 bracket과
+  중복이라 제거했다(`--pw-bracket none`, 기본값). 1,896 → **0개**. CPU smoke 기준으로
+  analytic 타깃 4개 데이터셋 평균 val $d$는 1.338로 attention(1.398)·
+  encoder-bracket(1.350)보다 낫고, iid에서만 attention이 앞선다(1.200 vs 1.442).
+  full recipe 재확인은 아직이다. 상세는 `pointwise_pipeline.md` §5.6.
+- **실무 주의.** 기본 반경 설정(`global_scale` $\alpha=0.75$, `candidate_k=32`)은
+  $N=128$에서 `graph_truncation_frac`이 0.36까지 오른다. GPU 실험에서는
+  `density_scaled` $\alpha=1.15$, $k_{\rm target}=16$, `candidate_k=64`를 쓴다
+  (`run_pointwise_suite.py`의 기본값). 이 설정에서도 $N=512$는 trunc 3.7e-04로 0이
+  아니므로 그보다 큰 $N$에서는 `--pw-candidates`를 올려야 한다.
+
+analytic contact-spring 타깃은 raw wrench의 second moment이고 이 모델은 latent
+covector의 second moment이므로 **matched target이 아니다** — 잔차를 표현력 부족으로
+읽기 전에 `--phase teacher`를 먼저 확인해야 한다. 위 결과는 그 순서로 읽은 것이다:
+teacher가 $10^{-3}$까지 내려가므로 analytic의 $10^{-1}$대 바닥은 최적화 문제가 아니다.
+
+아직 하지 않은 것: ablation 정량 비교(`--phase ablation`), seed 분산, analytic 잔차를
+이산화 오차와 함수족 차이로 분해하는 것. 또한 `err_rel_fm`은 centro $\eta=0$과
+tetra에서 타깃의 $K_{fm}$ 블록이 정확히 0이라 분모가 0이므로 읽지 않는다.
+
 ## 7. 재현과 파일 지도
 
 ```bash
@@ -174,6 +233,8 @@ conda run -n lieneurons python experiment/pc_se3_congruence/verify.py
 conda run -n lieneurons python experiment/pc_se3_congruence/check_killing_degeneracy.py
 conda run -n lieneurons python experiment/pc_se3_congruence/analyze_klein_gate.py
 conda run -n lieneurons python experiment/pc_se3_congruence/train.py --quick
+conda run -n lieneurons python experiment/pc_se3_congruence/verify_pointwise.py --full
+conda run -n lieneurons python -m pytest -q test/test_pc_pointwise_pipeline.py
 ```
 
 | 파일 | 역할 |
@@ -187,5 +248,13 @@ conda run -n lieneurons python experiment/pc_se3_congruence/train.py --quick
 | `analyze_klein_gate.py` | 두 경로 동치, cross-slot blockage, Klein gate/Relu 실험 |
 | `klein_gate_results.json` | 새 실험의 전체 수치 |
 | `figs/` | experiment B의 spatial/body/negative-control 시각화 |
+| `tensor_kernel_experiment_report.md` | compact kernel + second moment 보고서 |
+| `pointwise_pipeline.md` | pointwise 파이프라인 실험 보고서 (설계·구조 검증·full GPU 결과) |
+| `pointwise_graph.py` | tie-safe local graph, Wendland window, edge invariant |
+| `pointwise_models.py` | set encoder / message passing / Klein gate / late Gram head |
+| `verify_pointwise.py` | pointwise 구조 검증 A–F + ablation 표 |
+| `run_pointwise_suite.py` | verify / teacher / analytic / ablation phase 실행 |
+| `run_pointwise_gpu_experiments.sh` | Phase 1–3 일괄 실행 (§6.5 수치의 출처) |
+| `pointwise_verify_results.json` | Phase 1 구조 검증 수치 |
 
-마지막 갱신: 2026-08-03.
+마지막 갱신: 2026-08-07 (pointwise pipeline full GPU 결과 반영).

@@ -188,3 +188,5 @@ experiment/pc_se3_congruence/figs/
 *.json
 *.pt
 wandb/
+AGENTS.md
+*.png
