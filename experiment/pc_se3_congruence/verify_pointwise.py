@@ -105,13 +105,15 @@ def main():
     ap.add_argument('--device', default='cpu')
     ap.add_argument('--n-samples', type=int, default=4)
     ap.add_argument('--n-points', type=int, default=48)
-    ap.add_argument('--candidates', type=int, default=24)
-    ap.add_argument('--radius-mode', default='global_scale',
-                    choices=['global_scale', 'density_scaled', 'fixed',
-                             'knn_adaptive', 'knn_shell'])
-    ap.add_argument('--radius-alpha', type=float, default=0.75)
+    ap.add_argument('--candidates', type=int, default=64)
+    ap.add_argument('--radius-mode', default='degree_matched',
+                    choices=['degree_matched', 'global_scale',
+                             'density_scaled', 'fixed', 'knn_adaptive',
+                             'knn_shell'])
+    ap.add_argument('--radius-alpha', type=float, default=None,
+                    help='기본: 모드별 기본값 (degree_matched 1.0, 나머지 0.75)')
     ap.add_argument('--target-k', type=int, default=16,
-                    help='density_scaled가 맞추려는 평균 degree')
+                    help='degree_matched/density_scaled가 맞추려는 평균 degree')
     ap.add_argument('--lattice-side', type=int, default=3)
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--full', action='store_true',
@@ -195,6 +197,7 @@ def main():
             'knn-adaptive-radius': dict(radius_mode='knn_adaptive'),
             'knn-shell-radius': dict(radius_mode='knn_shell'),
             'density-scaled-radius': dict(radius_mode='density_scaled'),
+            'global-scale-radius': dict(radius_mode='global_scale'),
             'uniform-beta': dict(beta_mode='uniform'),
             'force-invariant': dict(use_force_invariant=True),
         }

@@ -828,6 +828,20 @@ GPU 실험 전에 반드시 알아야 할 실무 사항이다. 전역 스케일 
 ($\alpha=1.15$, $k_{\rm target}=16$, `candidate_k=64`)이 $N=48/128/512$ 전부에서 평균
 degree 9.6/13.5/15.3, truncation 0.000을 준다. 이것이 기본값을 밀도 보정으로 정한 이유다.
 
+> **후속 (2026-08-08) — 이 표의 처방은 부피 분포에 한정된다.** $(k_{\rm target}/N)^{1/3}$은
+> **내재차원 3 가정**이고, peg-and-hole 표면 스캔에서는 $N=512\to2048$에 degree가
+> 16.5→24.3으로 드리프트하며 곡선(내재차원 1)에서는 59.9·truncation 0.69로 무너진다.
+> `pointwise_graph.py`에 추가된 **`degree_matched`가 현재 기본값**이다: 평균 degree가
+> $k_{\rm target}$이 되는 반경은 전체 쌍거리 multiset의 $N k_{\rm target}$번째 순서통계량과
+> 정확히 같아서, 밀도 모형·차원 지수·반복 없이 닫힌 형태로 얻어진다. `candidate_k`는
+> support를 덮기만 하면 되는 메모리 예산이라 자동 조정하지 않고 기본값만 64로 올렸다.
+> 전 분포(부피 $N$=32–1024, 표면, 곡선, 래티스, centro/c2/tetra)에서 degree 15.4–16.0,
+> truncation 0.000이다. 상세는 `graph_radius.md`.
+>
+> **본 보고서의 수치는 유효하다.** §5.5의 18 run은 `run_pointwise_gpu_experiments.sh`가
+> `density_scaled` $\alpha$=1.15·`candidate_k=64`를 플래그로 고정하며, 그 설정에서 신·구
+> 코드의 graph 텐서가 비트 단위로 동일함을 확인했다.
+
 ### 5.8 회귀 검증
 
 - `pytest -q test/` → **40 passed** (기존 tensor 5 + 신규 35)

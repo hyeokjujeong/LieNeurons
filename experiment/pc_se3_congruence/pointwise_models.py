@@ -584,13 +584,20 @@ class PointwiseStiffnessModel(nn.Module):
 
     ``forward`` returns K [B, 6, 6]; ``factors`` returns the coframe L
     [B, 6, N H] with K = L L^T.  Graph diagnostics of the last forward pass are
-    in ``self.last_graph_stats`` (watch ``graph_truncation_frac``: any value
-    above 0 means top-k dropped in-support neighbours and set-equivariance is
-    no longer guaranteed -- raise candidate_k or shrink the radius).
+    in ``self.last_graph_stats``: keep ``graph_truncation_frac`` at 0, and if
+    it is not, ``graph_required_candidate_k`` is the value ``candidate_k`` has
+    to reach (or a sign that the radius is too large -- see
+    ``pointwise_graph``).
+
+    The default radius mode is 'degree_matched', which fixes the mean degree
+    at ``target_k`` for ANY point distribution.  The earlier default
+    ('global_scale') lets the degree grow without bound in N, and
+    'density_scaled' assumes an intrinsic dimension of 3 -- see
+    ``pointwise_graph`` for the measurements.
     """
 
-    def __init__(self, channels=(8, 16, 32, 16), factors=8, candidate_k=32,
-                 radius_mode='global_scale', radius_alpha=0.75,
+    def __init__(self, channels=(8, 16, 32, 16), factors=8, candidate_k=64,
+                 radius_mode='degree_matched', radius_alpha=None,
                  radius_value=None, support_k=8, target_k=16, tie_eps=0.0,
                  n_rbf=8, pool='basis_mean', bracket='none',
                  bracket_channels=None, use_bracket_layers=True,

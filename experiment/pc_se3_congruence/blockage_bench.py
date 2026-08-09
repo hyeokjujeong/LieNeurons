@@ -39,6 +39,11 @@ Examples:
       --encoder pointwise --method covector --target-graph teacher
   python experiment/pc_se3_congruence/blockage_bench.py --suite            # 표준 그리드
   python experiment/pc_se3_congruence/blockage_bench.py --dataset fiber   # 학습 없음
+  # 저장된 peg-and-hole PCD 데이터셋 (data_gen/gen_peg_hole_pcd.py로 생성) +
+  # 저장 라벨 K_contact + lambda*K_body; 512점으로 sensor-subsample
+  python experiment/pc_se3_congruence/blockage_bench.py --dataset peghole \
+      --encoder pointwise --method covector --target-graph stored \
+      --peghole-n-points 512
   ... --wandb-mode disabled  (wandb 없이 stdout만)
 """
 import argparse
@@ -50,6 +55,7 @@ import torch
 
 torch.set_default_dtype(torch.float64)
 
+from data_loader.peg_hole_data_loader import load_peg_hole_split
 from experiment.pc_se3_congruence.data_synth import (c2_clouds,
                                                      contact_spring_all_pairs_K,
                                                      contact_spring_K,
@@ -65,13 +71,15 @@ from experiment.pc_se3_congruence.encoders import (BracketPlueckerEncoder,
                                                    WrenchPlueckerEncoder)
 from experiment.pc_se3_congruence.metrics import (WANDB_ENTITY,
                                                      WANDB_PROJECT,
+                                                     airm_scale_shape,
                                                      block_metrics, f_signal,
-                                                     init_wandb)
+                                                     group_metrics, init_wandb)
+from experiment.pc_se3_congruence.peg_hole_synth import STAGES
 from experiment.pc_se3_congruence.models import (DualBackbone, GateBackbone,
                                                    ModelB, ModelPC2K,
                                                    WrenchSecondMomentModel)
-from experiment.pc_se3_congruence.pointwise_models import \
-    PointwiseStiffnessModel
+from experiment.pc_se3_congruence.pointwise_models import (
+    PointwiseStiffnessModel, bounded_invariant, force_pair, klein_pair)
 from experiment.pc_se3_congruence.train import EIG_CLAMP, affine_invariant_d
 
 DATASETS = {
@@ -164,6 +172,80 @@ def forward_K(method, model, P):
     return out[1] if isinstance(out, tuple) else out
 
 
+def _merge_graph_stats(chunks):
+    """Combine per-chunk graph stats into one set of numbers.
+
+    Degrees and truncation are size-weighted means (they are per-point rates);
+    the max/required capacities are maxima, because a single chunk that needed
+    a larger candidate budget is the one that would break set-equivariance.
+    """
+    if not chunks:
+        return {}
+    tot = sum(n for _, n in chunks)
+    out = {}
+    for key in chunks[0][0]:
+        vals = [(s[key], n) for s, n in chunks]
+        out[key] = (max(v for v, _ in vals)
+                    if key in ('graph_max_degree', 'graph_required_candidate_k',
+                               'graph_candidate_k')
+                    else sum(v * n for v, n in vals) / tot)
+    return out
+
+
+def eval_forward(args, model, P, chunk):
+    """Validation forward in chunks.
+
+    The graph builder materializes a [B, N, N] distance matrix, so an
+    unchunked val pass is O(n_val * N^2) -- at n_val=2048, N=1024 that is a
+    16 GiB allocation, well past a 24 GB card, even though the model itself is
+    tiny.  Chunking here does not change any number, only peak memory.
+    """
+    preds, stats = [], []
+    for i in range(0, P.shape[0], chunk):
+        preds.append(forward_K(args.method, model, P[i:i + chunk]))
+        s = getattr(model, 'last_graph_stats', None)
+        if s:
+            stats.append((dict(s), preds[-1].shape[0]))
+    return torch.cat(preds), _merge_graph_stats(stats)
+
+
+def head_diagnostics(model, P, chunk=64, n=256):
+    """Is the head's invariant scalar pathway actually alive?
+
+    K = (e^g / NH) sum beta_ih z_ih z_ih^T, and beta is the ONLY per-scene
+    handle on the magnitude (e^g is global).  beta is driven by invariants of
+    the latent covectors, so if those invariants are identically zero the whole
+    magnitude pathway degenerates to a constant and d_scale can never beat a
+    constant predictor -- silently, because nothing else looks wrong.
+
+    That is exactly what the Klein pairing does here: the encoder anchors every
+    neighbour wrench at the same point, so m_c = p x f_c holds through every
+    layer (LNLinear and the covector bracket both preserve it), and then
+    <X_c, X_c'> = f_c.(p x f_c') + (p x f_c).f_c' = 0 identically -- the two
+    triple products are the same determinant with two rows swapped.  Every
+    latent feature is a ZERO-PITCH wrench and the Klein form measures pitch.
+
+    beta_scene_std == 0 is the signature.  force_pair (f_a . f_b, enabled by
+    --pw-force-invariant) does not vanish on zero-pitch features.
+    """
+    h = getattr(model, 'head', None)
+    if h is None or getattr(h, 'weight_mode', None) != 'learned':
+        return {}
+    bs, iv = [], []
+    with torch.no_grad():
+        for i in range(0, min(n, P.shape[0]), chunk):
+            X = model.features(P[i:i + chunk])
+            bs.append(h.weights(X).mean(dim=(1, 2)))
+            u, v = h.proj_u(X), h.proj_v(X)
+            s = [bounded_invariant(klein_pair(u, v))]
+            if getattr(h, 'use_force', False):
+                s.append(bounded_invariant(force_pair(u, v)))
+            iv.append(torch.cat(s, 1).abs().mean(dim=(1, 2)))
+    bs, iv = torch.cat(bs), torch.cat(iv)
+    return {'beta_scene_std': bs.std().item(), 'beta_mean': bs.mean().item(),
+            'head_inv_abs': iv.mean().item()}
+
+
 def equiv_check(args, model, P, n_T=3):
     from experiment.pc_se3_congruence.se3_utils import (coadjoint, random_SE3,
                                                         scaled_err,
@@ -183,14 +265,65 @@ def equiv_check(args, model, P, n_T=3):
     return err
 
 
+def load_reference_levels(args):
+    """The two brackets every val_d has to be read between (peghole_baseline.py).
+
+    baseline_d : best CONSTANT predictor under AIRM.  val_d above it means the
+                 model learned nothing about the cloud.
+    mc_noise_d : distance between two subsample draws of the SAME scene, i.e.
+                 the resolution of the label itself.  val_d below it means one
+                 particular draw was memorised.
+
+    Only meaningful against the stored labels -- the teacher target is a frozen
+    network, for which neither number says anything, so they are not attached.
+    """
+    if not args.baseline_json or args.target_graph != 'stored':
+        return {}
+    import json
+    with open(args.baseline_json) as f:
+        b = json.load(f)
+    out = {'baseline_d': b['frechet_train_fit_on_val']['all']['mean']}
+    if 'mc_noise' in b:
+        out['mc_noise_d'] = b['mc_noise']['all']['mean']
+    print(f'[reference] baseline d {out["baseline_d"]:.3f}'
+          + (f'   MC label noise d {out["mc_noise_d"]:.3f}'
+             if 'mc_noise_d' in out else '')
+          + f'   ({args.baseline_json})')
+    return out
+
+
 def run_training(args, wb):
-    gen = torch.Generator().manual_seed(args.data_seed)
-    make = DATASETS[args.dataset]
-    n_total = args.n_train + args.n_val
-    P = make(n_total, args.n_points, gen, eta=args.eta) \
-        if args.dataset != 'iid' else make(n_total, args.n_points, gen)
-    P = P.to(args.device)
-    if args.target_graph == 'all':
+    K_stored, stage_va = None, None
+    if args.dataset == 'peghole':
+        # Stored peg-and-hole scenes (data_gen/gen_peg_hole_pcd.py):
+        # train/val come from their own on-disk splits, optionally
+        # sensor-subsampled to --peghole-n-points.  --n-points is unused here.
+        np_arg = args.peghole_n_points
+        kw = dict(seed=args.data_seed, lambda_body=args.lambda_body,
+                  relabel=not args.peghole_no_relabel, device=args.device)
+        P_tr_, K_tr_ = load_peg_hole_split(
+            args.peghole_root, 'train', n=args.n_train, n_points=np_arg, **kw)
+        # extras only on val: the stage id localizes which regime fails
+        # (free has no contact at all, insert is contact-dominated), which a
+        # single pooled val_d hides.
+        P_va_, K_va_, info_va = load_peg_hole_split(
+            args.peghole_root, 'val', n=args.n_val, n_points=np_arg,
+            extras=True, **kw)
+        stage_va = info_va['stage'].to(args.device)
+        P = torch.cat([P_tr_, P_va_]).to(args.device)
+        K_stored = torch.cat([K_tr_, K_va_]).to(args.device)
+        print(f'[peghole] root={args.peghole_root}  N={P.shape[1]}  '
+              f'train/val={args.n_train}/{args.n_val}')
+    else:
+        gen = torch.Generator().manual_seed(args.data_seed)
+        make = DATASETS[args.dataset]
+        n_total = args.n_train + args.n_val
+        P = make(n_total, args.n_points, gen, eta=args.eta) \
+            if args.dataset != 'iid' else make(n_total, args.n_points, gen)
+        P = P.to(args.device)
+    if args.target_graph == 'stored':
+        target_fn = None
+    elif args.target_graph == 'all':
         target_fn = lambda x: contact_spring_all_pairs_K(
             x, sigma_k=args.sigma_k)
     elif args.target_graph == 'kernel':
@@ -213,11 +346,14 @@ def run_training(args, wb):
             x, k=args.k_gt, sigma_k=args.sigma_k)
     # All-pairs tensors are deliberately evaluated in chunks: a full recipe
     # otherwise materializes [4096,128,128,...] intermediates at once.
-    with torch.no_grad():
-        K_gt = torch.cat([
-            target_fn(P[i:i + args.target_batch])
-            for i in range(0, P.shape[0], args.target_batch)
-        ])
+    if target_fn is None:
+        K_gt = K_stored
+    else:
+        with torch.no_grad():
+            K_gt = torch.cat([
+                target_fn(P[i:i + args.target_batch])
+                for i in range(0, P.shape[0], args.target_batch)
+            ])
     lam_gt = torch.linalg.eigvalsh(K_gt)
     if lam_gt[:, 0].min() <= 0:
         raise ValueError(
@@ -254,11 +390,20 @@ def run_training(args, wb):
         print(f'[centro eta=0] 해석적 하한: d >= {floor:.2f}')
         if wb: wb.summary['analytic_floor_d'] = floor
 
+    ref = load_reference_levels(args)
+    if wb:
+        wb.summary.update(ref)
+        try:            # best val over the run, without a manual pass over logs
+            wb.define_metric('val_d', summary='min')
+        except Exception:
+            pass
+    best = {'val_d': float('inf'), 'epoch': -1}
+
     S = P_tr.shape[0]
     gp = torch.Generator().manual_seed(args.data_seed + 1)
     for ep in range(epochs):
         perm = torch.randperm(S, generator=gp)
-        tot, nb, ncl = 0.0, 0, 0
+        tot, nb, ncl, gtot = 0.0, 0, 0, 0.0
         for b in range(0, S, args.batch):
             i = perm[b:b + args.batch]
             d, n_c = affine_invariant_d(L_tr[i], forward_K(args.method, model, P_tr[i]))
@@ -266,7 +411,10 @@ def run_training(args, wb):
             if opt is not None:
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                # pre-clip norm: the direct evidence for "is this an
+                # optimisation problem?" when the teacher phase does not reach 0
+                gtot += float(torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), 1.0))
                 opt.step()
             tot, nb, ncl = tot + loss.item(), nb + 1, ncl + n_c
         if sched is not None:
@@ -274,34 +422,73 @@ def run_training(args, wb):
 
         model.eval()
         with torch.no_grad():
-            K_pred = forward_K(args.method, model, P_va)
+            # Stats come back from eval_forward rather than being read off the
+            # model afterwards: f_signal below runs another forward on a subset
+            # and would overwrite last_graph_stats with that subset's graph.
+            K_pred, graph_stats = eval_forward(args, model, P_va,
+                                               args.eval_batch)
             d_va, _ = affine_invariant_d(L_va, K_pred)
-        # Snapshot before f_signal below runs another forward on a subset and
-        # overwrites the stats with that subset's graph.
-        graph_stats = dict(getattr(model, 'last_graph_stats', {}))
         log = {'train_d': tot / nb, 'val_d': d_va.mean().item(),
-               'clamped': ncl,
+               'clamped': ncl, 'grad_norm': gtot / nb,
+               'gap': d_va.mean().item() - tot / nb,
                'lr': sched.get_last_lr()[0] if sched is not None else 0.0,
+               **airm_scale_shape(L_va, K_pred),
+               **head_diagnostics(model, P_va),
+               **ref,
                'f_signal': f_signal(model, P_va[:64],
                                     slice(0, 3) if args.method == 'covector'
                                     else slice(3, 6)),   # covector:[f;m] / vector:[v;w]
                **block_metrics(K_pred, K_va),
                # graph_truncation_frac > 0 이면 support 안의 이웃이 top-k에서
                # 잘려나갔다는 뜻 — set-equivariance 보장이 깨진다.
-               **graph_stats}
+               **graph_stats,
+               **(group_metrics(K_pred, K_va, d_va, stage_va, STAGES)
+                  if stage_va is not None else {})}
+        # The headline number of the whole experiment: an absolute val_d says
+        # nothing, the ratio to the best constant predictor does.
+        if 'baseline_d' in ref:
+            log['val_d_rel'] = log['val_d'] / ref['baseline_d']
+        if log['val_d'] < best['val_d']:
+            best = {'val_d': log['val_d'], 'epoch': ep}
+            if args.ckpt_out:
+                torch.save({'state_dict': model.state_dict(), 'epoch': ep,
+                            'val_d': log['val_d'], 'args': vars(args)},
+                           args.ckpt_out)
         model.train()
         if wb: wb.log(log, step=ep)
         if ep % max(1, epochs // 10) == 0 or ep == epochs - 1:
             extra = (f'  deg {log["graph_mean_degree"]:.1f}'
                      f'  trunc {log["graph_truncation_frac"]:.3f}'
                      if 'graph_mean_degree' in log else '')
+            rel = (f'  rel {log["val_d_rel"]:.3f}' if 'val_d_rel' in log
+                   else '')
             print(f'ep {ep:4d}  train d {log["train_d"]:8.3f}  '
-                  f'val d {log["val_d"]:8.3f}  ff {log["err_rel_ff"]:.3f}  '
+                  f'val d {log["val_d"]:8.3f}{rel}  '
+                  f'scale {log["d_scale"]:6.3f}  shape {log["d_shape"]:6.3f}  '
+                  f'ff {log["err_rel_ff"]:.3f}  '
                   f'mm {log["err_rel_mm"]:.3f}  rank {log["rank_pred"]:.1f}  '
-                  f'|f_c| {log["f_signal"]:.4f}{extra}', flush=True)
+                  f'clamp {log["clamped"]:5d}  |g| {log["grad_norm"]:.2e}  '
+                  + (f'βσ {log["beta_scene_std"]:.2e}  '
+                     f'inv {log["head_inv_abs"]:.2e}  '
+                     if 'beta_scene_std' in log else '')
+                  + f'|f_c| {log["f_signal"]:.4f}{extra}', flush=True)
+            if stage_va is not None:
+                print('            stage  ' + '  '.join(
+                    f'{s}: d {log[f"{s}/val_d"]:6.3f} ff {log[f"{s}/err_rel_ff"]:.3f}'
+                    f' mm {log[f"{s}/err_rel_mm"]:.3f}'
+                    for s in STAGES if log.get(f'{s}/n')), flush=True)
     eq1 = equiv_check(args, model, P_va[:32])
     print(f'학습 후 equivariance: {eq1:.2e}')
-    if wb: wb.summary['equiv_err_final'] = eq1
+    rel_best = (f'  (기준선 대비 {best["val_d"] / ref["baseline_d"]:.3f})'
+                if 'baseline_d' in ref else '')
+    print(f'최저 val d {best["val_d"]:.4f} @ ep {best["epoch"]}{rel_best}'
+          + (f'  -> {args.ckpt_out}' if args.ckpt_out else ''))
+    if wb:
+        wb.summary['equiv_err_final'] = eq1
+        wb.summary['best_val_d'] = best['val_d']
+        wb.summary['best_epoch'] = best['epoch']
+        if 'baseline_d' in ref:
+            wb.summary['best_val_d_rel'] = best['val_d'] / ref['baseline_d']
     return log
 
 
@@ -363,7 +550,22 @@ def main():
 
     ap = argparse.ArgumentParser(parents=[pre])
     ap.add_argument('--dataset', default='centro',
-                    choices=list(DATASETS) + ['fiber'])
+                    choices=list(DATASETS) + ['fiber', 'peghole'],
+                    help=('peghole: 저장된 peg-and-hole 표면 PCD 데이터셋 '
+                          '(data_gen/gen_peg_hole_pcd.py로 생성)'))
+    ap.add_argument('--peghole-root', default='data/peg_hole/v1',
+                    help='peghole 데이터셋 디렉터리 (meta.json 위치)')
+    ap.add_argument('--peghole-n-points', type=int, default=None,
+                    help=('peghole cloud를 점 n개로 서브샘플 (기본: 저장된 '
+                          '해상도 그대로; --n-points는 peghole에 미적용). '
+                          '권장 1024 — 라벨 구조가 온전하면서 학습이 현실적'))
+    ap.add_argument('--peghole-no-relabel', action='store_true',
+                    help=('서브샘플에서 라벨을 재계산하지 않고 저장 라벨(full '
+                          'cloud 기준)을 그대로 쓴다. 회귀가 ill-posed해지므로 '
+                          '비교 목적으로만 사용'))
+    ap.add_argument('--lambda-body', type=float, default=None,
+                    help=('peghole 타깃 K = K_contact + lambda*K_body의 '
+                          'lambda (기본: meta.json의 캘리브레이션 값)'))
     ap.add_argument('--encoder', default='plueck',
                     choices=['plueck', 'learnable', 'bracket', 'tensor',
                              'pointwise'],
@@ -386,14 +588,21 @@ def main():
     ap.add_argument('--k-gt', type=int, default=8)
     ap.add_argument('--sigma-k', type=float, default=0.5)
     ap.add_argument('--target-graph', default='knn',
-                    choices=['knn', 'kernel', 'all', 'teacher'],
+                    choices=['knn', 'kernel', 'all', 'teacher', 'stored'],
                     help=('GT contact spring graph; kernel은 local compact window, '
                           'all은 exact-tie 대조군, teacher는 같은 클래스의 고정 '
-                          '난수 모델(realizability 검증, pointwise 전용)'))
+                          '난수 모델(realizability 검증, pointwise 전용), '
+                          'stored는 peghole 데이터셋의 저장 라벨 '
+                          'K_contact + lambda*K_body (peghole 전용)'))
     ap.add_argument('--teacher-seed', type=int, default=7,
                     help='--target-graph teacher의 고정 teacher 모델 seed')
     ap.add_argument('--target-batch', type=int, default=64,
                     help='GT 생성 chunk 크기 (all-pairs 메모리 제어)')
+    ap.add_argument('--eval-batch', type=int, default=64,
+                    help=('검증 forward chunk 크기. 그래프가 [B,N,N] 거리행렬을 '
+                          '만들므로 n_val 전체를 한 번에 돌리면 N=1024, '
+                          'n_val=2048에서 16 GiB를 요구한다 (숫자는 불변, '
+                          '최대 메모리만 달라진다)'))
     ap.add_argument('--lift-hidden', type=int, default=8,
                     help='learnable VN lift의 hidden channel 수')
     ap.add_argument('--tensor-graph', default='all',
@@ -423,15 +632,22 @@ def main():
     pw.add_argument('--pw-channels', type=int, nargs='+', default=[8, 16, 32, 16],
                     help='[C_0(set pooling), C_1, ...]; 권장 8-16-32-16')
     pw.add_argument('--pw-factors', type=int, default=8, help='factor 채널 H')
-    pw.add_argument('--pw-candidates', type=int, default=32,
-                    help='point당 후보 이웃 수 k (support보다 넉넉해야 한다)')
-    pw.add_argument('--pw-radius-mode', default='global_scale',
-                    choices=['global_scale', 'density_scaled', 'fixed',
-                             'knn_adaptive', 'knn_shell'],
-                    help=('support 반경 정의. 앞의 셋은 smooth·invariant(tie-safe), '
+    pw.add_argument('--pw-candidates', type=int, default=64,
+                    help=('point당 후보 이웃 수 k — 모델 파라미터가 아니라 메모리 '
+                          '예산이며 support를 덮기만 하면 된다. 부족하면 로그의 '
+                          'graph_required_candidate_k가 필요한 값을 알려준다'))
+    pw.add_argument('--pw-radius-mode', default='degree_matched',
+                    choices=['degree_matched', 'global_scale',
+                             'density_scaled', 'fixed', 'knn_adaptive',
+                             'knn_shell'],
+                    help=('support 반경 정의. degree_matched(기본)는 평균 degree를 '
+                          'target_k로 고정하는 닫힌 형태 분위수 반경 — 부피/표면/곡선 '
+                          '어느 분포에서도 동일하게 동작한다. global_scale은 N에 따라 '
+                          'degree가 발산하고 density_scaled는 내재차원 3을 가정한다. '
                           'knn_*는 anchor별 k번째 거리에 의존하는 비교군'))
-    pw.add_argument('--pw-radius-alpha', type=float, default=0.75,
-                    help='global_scale/density_scaled의 반경 계수')
+    pw.add_argument('--pw-radius-alpha', type=float, default=None,
+                    help=('반경 계수 (기본: 모드별 기본값 — degree_matched는 1.0, '
+                          '나머지는 0.75)'))
     pw.add_argument('--pw-radius', type=float, default=None,
                     help="radius-mode=fixed의 물리 반경")
     pw.add_argument('--pw-support-k', type=int, default=8,
@@ -476,6 +692,12 @@ def main():
                     help='factor별 positive weight beta_ih')
     pw.add_argument('--pw-force-invariant', action='store_true',
                     help='gate/head 불변량에 f_c . f_d 계열 추가')
+    ap.add_argument('--baseline-json',
+                    help=('peghole_baseline.py가 낸 json. Frechet 기준선과 라벨 '
+                          'MC 잡음을 읽어 val_d_rel(기준선 대비 비율)을 '
+                          '지표로 만든다. --target-graph stored에만 적용'))
+    ap.add_argument('--ckpt-out',
+                    help='val_d 최저점의 state_dict 저장 경로 (없으면 저장 안 함)')
     ap.add_argument('--data-seed', type=int, default=100)
     ap.add_argument('--model-seed', type=int, default=0)
     ap.add_argument('--device',
@@ -523,6 +745,11 @@ def one(args):
             raise ValueError('pointwise 백본의 비선형성은 --pw-bracket / --pw-gate로 지정합니다')
     if args.target_graph == 'teacher' and args.encoder != 'pointwise':
         raise ValueError('--target-graph teacher는 --encoder pointwise 전용입니다')
+    if args.target_graph == 'stored' and args.dataset != 'peghole':
+        raise ValueError('--target-graph stored는 --dataset peghole 전용입니다')
+    if args.dataset == 'peghole' and args.target_graph in ('knn', 'all'):
+        print('[peghole] 경고: 저장 라벨 대신 on-the-fly '
+              f'{args.target_graph} 타깃을 사용합니다 (대조군 용도)')
     if args.dataset == 'tetra' and args.n_points % 12 != 0:
         adj = max(12, args.n_points // 12 * 12)
         print(f'[tetra] n_points {args.n_points} -> {adj} (12의 배수 보정)')
@@ -538,7 +765,9 @@ def one(args):
               if args.encoder == 'pointwise' else '')
            + (f'-target-{args.target_graph}'
               if args.target_graph != 'knn' else '')
-           + (f'-eta{args.eta}' if args.dataset != 'iid' else
+           + (f'-N{args.peghole_n_points or "full"}'
+              if args.dataset == 'peghole' else
+              f'-eta{args.eta}' if args.dataset != 'iid' else
               f'-N{args.n_points}'))
     wb = init_wandb(tag, vars(args), mode=args.wandb_mode,
                     project=args.wandb_project, entity=args.wandb_entity)

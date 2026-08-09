@@ -35,6 +35,65 @@ def block_metrics(K_pred, K_gt, eps=1e-30):
     return out
 
 
+def airm_scale_shape(chol_gt, K_pred, eig_clamp=1e-12):
+    """Split the AIRM distance into an isotropic-scale part and a shape part.
+
+    With log(lambda_i) = mu + delta_i and mu the mean over the six generalized
+    eigenvalues (so sum delta_i = 0), the split is exactly orthogonal:
+
+        d^2 = 6 mu^2 + sum delta_i^2 = d_scale^2 + d_shape^2,
+        mu  = (log det K_pred - log det K_gt) / 6.
+
+    Why it matters here: the model carries exactly ONE global scale handle (the
+    learned scalar e^g in the head).  A large d_scale therefore means that one
+    scalar has not converged, not that the model lacks expressivity; only
+    d_shape is evidence of model-class mismatch.
+
+    The Pythagorean identity is PER SAMPLE (verified to 2e-15); the values
+    logged here are batch means, so they do not recompose into ``val_d`` --
+    read them as the average magnitude of each component.  ``scale_ratio`` is the
+    geometric-mean eigenvalue ratio e^mu -- above 1 the prediction is too
+    stiff.  It is also the honest version of the exp(d/sqrt6) reading, which
+    assumes the whole error is isotropic.
+    """
+    X = torch.linalg.solve_triangular(chol_gt, K_pred, upper=False)
+    A = torch.linalg.solve_triangular(chol_gt, X.transpose(-1, -2), upper=False)
+    A = 0.5 * (A + A.transpose(-1, -2))
+    ll = torch.linalg.eigvalsh(A).clamp_min(eig_clamp).log()
+    mu = ll.mean(-1)
+    n = ll.shape[-1]
+    d_scale = (n ** 0.5) * mu.abs()
+    d_shape = (ll - mu.unsqueeze(-1)).square().sum(-1).sqrt()
+    return {'d_scale': d_scale.mean().item(),
+            'd_shape': d_shape.mean().item(),
+            # signed, in log units: >0 means systematically over-stiff
+            'scale_bias': mu.mean().item(),
+            'scale_ratio': mu.mean().exp().item()}
+
+
+def group_metrics(K_pred, K_gt, d, group, names, eps=1e-30):
+    """Same diagnostics as block_metrics, split by an integer group label.
+
+    peg-and-hole의 stage(free/search/insert)처럼 타깃의 물리적 성격이 그룹마다
+    다른 데이터에서, 총합 val_d 하나는 어느 그룹이 실패했는지 감춘다.
+    """
+    out = {}
+    for gi, name in enumerate(names):
+        m = group == gi
+        n = int(m.sum().item())
+        out[f'{name}/n'] = n
+        if n == 0:
+            continue
+        out[f'{name}/val_d'] = d[m].mean().item()
+        for blk, (r, c) in {'ff': (slice(0, 3), slice(0, 3)),
+                            'fm': (slice(0, 3), slice(3, 6)),
+                            'mm': (slice(3, 6), slice(3, 6))}.items():
+            num = (K_pred[m][:, r, c] - K_gt[m][:, r, c]).norm(dim=(1, 2))
+            den = K_gt[m][:, r, c].norm(dim=(1, 2)) + eps
+            out[f'{name}/err_rel_{blk}'] = (num / den).mean().item()
+    return out
+
+
 def f_signal(model, P, direction_slots):
     """Encoder direction-channel norm — ff-계보의 유일한 입력 신호.
 

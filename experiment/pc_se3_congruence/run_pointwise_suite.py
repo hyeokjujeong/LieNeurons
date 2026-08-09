@@ -60,6 +60,7 @@ ABLATIONS = {
     'knn-adaptive-radius': ['--pw-radius-mode', 'knn_adaptive'],
     'knn-shell-radius': ['--pw-radius-mode', 'knn_shell'],
     'density-scaled-radius': ['--pw-radius-mode', 'density_scaled'],
+    'global-scale-radius': ['--pw-radius-mode', 'global_scale'],
     'uniform-beta': ['--pw-beta', 'uniform'],
     'force-invariant': ['--pw-force-invariant'],
     'beta-normalized': ['--pw-normalize', 'beta'],
@@ -79,10 +80,11 @@ def bench_command(args, target_graph, extra):
            '--pw-channels', *[str(c) for c in args.pw_channels],
            '--pw-factors', str(args.pw_factors),
            '--pw-radius-mode', args.pw_radius_mode,
-           '--pw-radius-alpha', str(args.pw_radius_alpha),
            '--pw-target-k', str(args.pw_target_k),
            '--pw-pool', args.pw_pool,
            '--wandb-mode', args.wandb_mode]
+    if args.pw_radius_alpha is not None:
+        cmd += ['--pw-radius-alpha', str(args.pw_radius_alpha)]
     if '--encoder' not in extra:
         cmd += ['--encoder', 'pointwise']
     if args.quick:
@@ -101,8 +103,9 @@ def verify_command(args):
     cmd = [sys.executable, str(script), '--full',
            '--candidates', str(args.pw_candidates),
            '--radius-mode', args.pw_radius_mode,
-           '--radius-alpha', str(args.pw_radius_alpha),
            '--target-k', str(args.pw_target_k)]
+    if args.pw_radius_alpha is not None:
+        cmd += ['--radius-alpha', str(args.pw_radius_alpha)]
     if args.device is not None:
         cmd += ['--device', args.device]
     if args.out is not None:
@@ -128,12 +131,16 @@ def main():
     ap.add_argument('--pw-channels', type=int, nargs='+',
                     default=[8, 16, 32, 16])
     ap.add_argument('--pw-factors', type=int, default=8)
-    # density_scaled + alpha 1.15 + target_k 16 은 N=48/128/512에서 각각 평균
-    # degree 9.6/13.5/15.3, truncation 0.000 (candidate_k=64 기준)이다.
-    ap.add_argument('--pw-radius-mode', default='density_scaled',
-                    choices=['global_scale', 'density_scaled', 'fixed',
-                             'knn_adaptive', 'knn_shell'])
-    ap.add_argument('--pw-radius-alpha', type=float, default=1.15)
+    # degree_matched는 분포·내재차원·N과 무관하게 평균 degree를 target_k로 고정한다.
+    # §5.5의 published 수치는 density_scaled + alpha 1.15 + target_k 16으로 얻었고
+    # (N=48/128/512에서 평균 degree 9.6/13.5/15.3), 그 조합은
+    # run_pointwise_gpu_experiments.sh가 플래그로 고정하므로 재현에는 영향이 없다.
+    ap.add_argument('--pw-radius-mode', default='degree_matched',
+                    choices=['degree_matched', 'global_scale',
+                             'density_scaled', 'fixed', 'knn_adaptive',
+                             'knn_shell'])
+    ap.add_argument('--pw-radius-alpha', type=float, default=None,
+                    help='기본: 모드별 기본값 (degree_matched 1.0, 나머지 0.75)')
     ap.add_argument('--pw-target-k', type=int, default=16)
     ap.add_argument('--pw-pool', default='basis_mean',
                     choices=['basis', 'basis_mean', 'attention', 'sum', 'mean'])

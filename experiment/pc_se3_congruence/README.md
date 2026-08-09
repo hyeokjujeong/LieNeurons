@@ -256,5 +256,54 @@ conda run -n lieneurons python -m pytest -q test/test_pc_pointwise_pipeline.py
 | `run_pointwise_suite.py` | verify / teacher / analytic / ablation phase 실행 |
 | `run_pointwise_gpu_experiments.sh` | Phase 1–3 일괄 실행 (§6.5 수치의 출처) |
 | `pointwise_verify_results.json` | Phase 1 구조 검증 수치 |
+| `peg_hole_dataset.md` | **peg-and-hole 실물형 PCD 데이터셋** 설계·캘리브레이션·검증 문서 |
+| `peg_hole_synth.py` | peg/hole 장면·표면 PCD·contact/body 라벨 생성 라이브러리 |
+| `visualize_peg_hole.py` | 장면 예시·라벨 구조 figure (`figs/peghole_*.png`) |
+| `graph_radius.md` | **local graph 반경·후보 예산의 현재 방법**과 설계 근거 |
 
-마지막 갱신: 2026-08-07 (pointwise pipeline full GPU 결과 반영).
+## 8. Peg-and-hole 데이터셋 (2026-08-08)
+
+추상 blob 대신 실물형 조립 장면(프리즘 peg + 관통구멍 plate, 3단계 stage 혼합)의
+표면 PCD 122,880쌍(N=2048)을 `data/peg_hole/v1`에 생성했다. 라벨은
+$K = K_{\text{contact}} + \lambda K_{\text{body}}$ (정확히 congruence-equivariant,
+분리 저장, $\lambda$ 로더 합성). peg 단면이 대칭 클래스($C_\infty/C_3/C_4/C_6/C_2$/
+비대칭)를 이루어 선행 rank-collapse·tie 벤치의 실물 대응이 된다. 상세는
+`peg_hole_dataset.md`, 학습은 `blockage_bench.py --dataset peghole
+--target-graph stored --peghole-n-points 1024`.
+
+**서브샘플 시 재라벨이 필수다.** 저장 라벨은 2048점 full cloud의 함수이므로
+서브샘플과 짝지으면 회귀가 ill-posed해진다 (실측 AIRM 하한 2.2, 학습이 4.69에서
+고착). 로더는 `n_points`가 주어지면 그 점들에서 라벨을 재계산하고 캐시한다
+(`relabel=True` 기본). 권장 해상도는 $N_0=1024$ — 라벨의 stage 구조가 온전한
+최저 해상도는 256이지만 (128에서 붕괴), 학습 비용 $O(N^2)$과의 절충점이다.
+
+realizability 통제군(`--target-graph teacher`)은 40 epoch에서 val $d$ 0.002까지
+내려간다 — 답이 입력 안에 있으면 최적화·표현력 모두 문제없음을 확인해 준다.
+
+## 9. 그래프 반경: `degree_matched`가 새 기본값 (2026-08-08)
+
+peg-hole 데이터가 드러낸 문제는 표면 분포에 국한되지 않았다. 종전 기본값
+`global_scale`은 degree가 $N$에 따라 발산하고(iid **부피** N=512에서 trunc 0.71,
+peg-hole N=2048에서 1.00), `density_scaled`의 $(k/N)^{1/3}$은 **내재차원 3 가정**이라
+표면(16.5→24.3 드리프트)과 곡선(degree 59.9, trunc 0.69)에서 무너진다.
+
+**수정.** 평균 degree가 `target_k`가 되는 반경은 전체 쌍거리 multiset 중
+$N\cdot k_{\rm target}$번째로 작은 값과 정확히 같다 — 밀도 모형도 차원 지수도 반복도
+없는 닫힌 형태이고, multiset 순서통계량이라 순열·강체 불변에 tie에서도 연속이다.
+이것이 `degree_matched`이며 **새 기본값**이다. `candidate_k`는 모델 파라미터가 아니라
+support를 덮기만 하면 되는 메모리 예산이므로 자동 조정하지 않고 기본값을 64로 올렸다
+(필요 예산 = 최대 in-support degree, 경험칙 $4k_{\rm target}$). truncation 지표는 대리
+지표에서 정확한 계수 비교(`in_support > k`)로 바꾸고, 필요한 예산값
+`graph_required_candidate_k`를 함께 보고한다.
+
+측정: iid 부피 N=32–1024, peg-hole 표면 N=512/2048, 곡선, 래티스, centro/c2/tetra
+**전부** degree 15.4–16.0 · trunc 0.000 (`target_k=16`, `candidate_k=64`). 상세와
+설계 근거는 `graph_radius.md`. 구조 지표는 그대로다 —
+equivariance $\le1.8\times10^{-15}$, permutation $\le5.5\times10^{-16}$, rank 6,
+래티스 정확-tie permutation 2.5e-16.
+
+**재현 영향 없음.** §6.5의 published 경로(`density_scaled` $\alpha$=1.15,
+candidate_k=64)는 `run_pointwise_gpu_experiments.sh`가 플래그로 고정하고, 그 설정에서
+신·구 코드의 graph 텐서(window/radius/idx/dist)가 **비트 단위로 동일**함을 확인했다.
+
+마지막 갱신: 2026-08-08 (peg-and-hole 데이터셋 + degree_matched 반경).

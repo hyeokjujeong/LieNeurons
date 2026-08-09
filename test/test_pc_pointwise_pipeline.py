@@ -13,6 +13,7 @@ from experiment.pc_se3_congruence.data_synth import (c2_clouds, lattice_clouds,
 from experiment.pc_se3_congruence.encoders import WrenchEdgeEncoder
 from experiment.pc_se3_congruence.models import WrenchSecondMomentModel
 from experiment.pc_se3_congruence.pointwise_graph import (build_local_graph,
+                                                          degree_matched_radius,
                                                           wendland_c2)
 from experiment.pc_se3_congruence.pointwise_models import (
     LocalWrenchSetEncoder, PointwiseStiffnessModel, force_pair, klein_pair)
@@ -25,7 +26,9 @@ DTYPE = torch.float64
 
 def _model(seed=0, **kw):
     torch.manual_seed(seed)
-    kw.setdefault('candidate_k', 16)
+    # the shipping default: candidate_k only has to cover the support, and
+    # a starved budget breaks tie-invariance for real (see the lattice test)
+    kw.setdefault('candidate_k', 64)
     return PointwiseStiffnessModel(**kw).to(DTYPE).eval()
 
 
@@ -48,16 +51,160 @@ def test_wendland_window_vanishes_with_zero_derivative_at_the_cutoff():
 
 def test_graph_support_is_invariant_and_reports_truncation():
     P, gen = _clouds()
-    g0 = build_local_graph(P, candidate_k=16)
+    g0 = build_local_graph(P, candidate_k=64)
     R, p = random_SE3(1.0, gen, dtype=DTYPE)
-    g1 = build_local_graph(transform_cloud(P, R, p), candidate_k=16)
+    g1 = build_local_graph(transform_cloud(P, R, p), candidate_k=64)
     torch.testing.assert_close(g0.window, g1.window, rtol=1e-11, atol=1e-11)
     torch.testing.assert_close(g0.radius, g1.radius, rtol=1e-11, atol=1e-11)
     assert 0.0 <= g0.truncation_frac <= 1.0
 
     # A support that swallows every point must flag truncation.
-    tight = build_local_graph(P, candidate_k=4, radius_alpha=10.0)
+    tight = build_local_graph(P, candidate_k=4, radius_mode='global_scale',
+                              radius_alpha=10.0)
     assert tight.truncation_frac > 0.0
+
+
+# ------------------------------------------- degree-matched radius (default)
+def _surface_cloud(n, gen):
+    """Points on a sphere: intrinsic dimension 2, where the (k/N)^(1/3)
+    density correction of 'density_scaled' is wrong by construction."""
+    v = torch.randn(2, n, 3, generator=gen, dtype=DTYPE)
+    return v / v.norm(dim=-1, keepdim=True)
+
+
+def _curve_cloud(n, gen):
+    """Points along a helix: intrinsic dimension 1, the extreme case."""
+    t = torch.linspace(0.0, 6.0, n, dtype=DTYPE)
+    c = torch.stack([t.cos(), t.sin(), 0.3 * t], dim=-1)
+    return c.unsqueeze(0).repeat(2, 1, 1) \
+        + 1e-3 * torch.randn(2, n, 3, generator=gen, dtype=DTYPE)
+
+
+@pytest.mark.parametrize('make,n', [
+    (lambda n, g: torch.randn(2, n, 3, generator=g, dtype=DTYPE), 256),
+    (_surface_cloud, 256),
+    (_curve_cloud, 256),
+])
+def test_degree_matched_radius_hits_the_target_on_any_distribution(make, n):
+    """The point of the mode: mean degree = target_k for a volumetric blob
+    (intrinsic dim 3), a sphere (2) and a helix (1) alike -- the fixed-exponent
+    modes cannot, since they hard-code one of those dimensions."""
+    gen = torch.Generator().manual_seed(0)
+    P = make(n, gen)
+    for target in (8, 16, 32):
+        # the budget has to scale with the target, not with N: density
+        # heterogeneity puts the max in-support degree at ~3.2x the mean, so
+        # 4x target_k is the working rule of thumb.
+        g = build_local_graph(P, candidate_k=4 * target, target_k=target)
+        assert abs(g.mean_degree - target) <= 0.15 * target, \
+            f'target {target}, got {g.mean_degree}'
+        assert g.truncation_frac == 0.0
+        assert g.required_candidate_k <= 4 * target
+
+
+def test_degree_matched_identity_holds_even_on_a_degenerate_spectrum():
+    """A lattice has huge exact-tie shells, so a mean degree of exactly
+    target_k is simply not attainable by ANY radius.  What the calibration
+    still guarantees is the quantile sandwich
+
+        mean count(d <  r)  <=  target_k  <=  mean count(d <= r),
+
+    i.e. r is the tightest radius that does not undershoot.  The windowed
+    degree lands on the lower branch because wendland is 0 at q = 1 and drops
+    the boundary shell whole -- that gap is the tie-safety property itself.
+    On non-degenerate clouds the two branches differ by 1/N and the sandwich
+    collapses to the equality the docstring advertises."""
+    gen = torch.Generator().manual_seed(0)
+    P = lattice_clouds(2, 6, gen, dtype=DTYPE)
+    N = P.shape[1]
+    d = torch.cdist(P, P, compute_mode='donot_use_mm_for_euclid_dist')
+    d = d + torch.eye(N, dtype=DTYPE) * 1e12
+    for target in (8, 16, 32):
+        r = degree_matched_radius(d, target)
+        below = (d < r).sum(-1).to(DTYPE).mean().item()
+        upto = (d <= r).sum(-1).to(DTYPE).mean().item()
+        assert below <= target <= upto, f'{below} !<= {target} !<= {upto}'
+        g = build_local_graph(P, candidate_k=64, target_k=target)
+        assert abs(g.mean_degree - below) < 1e-9   # boundary shell dropped
+        assert g.truncation_frac == 0.0
+
+    # and on a generic cloud the sandwich really is tight
+    Q = torch.randn(2, 200, 3, generator=gen, dtype=DTYPE)
+    dq = torch.cdist(Q, Q, compute_mode='donot_use_mm_for_euclid_dist')
+    dq = dq + torch.eye(200, dtype=DTYPE) * 1e12
+    r = degree_matched_radius(dq, 16)
+    assert (dq <= r).sum(-1).to(DTYPE).mean().item() - 16 < 2.0 / 200
+
+
+def test_degree_matched_radius_is_invariant_and_relabelling_proof():
+    gen = torch.Generator().manual_seed(1)
+    P = torch.randn(2, 96, 3, generator=gen, dtype=DTYPE)
+    g0 = build_local_graph(P, candidate_k=32)
+    R, p = random_SE3(1.0, gen, dtype=DTYPE)
+    g1 = build_local_graph(transform_cloud(P, R, p), candidate_k=32)
+    perm = torch.randperm(P.shape[1], generator=gen)
+    g2 = build_local_graph(P[:, perm], candidate_k=32)
+    for g in (g1, g2):
+        torch.testing.assert_close(g.radius, g0.radius, rtol=1e-12, atol=1e-12)
+    # exact ties (a lattice) must not move the calibrated radius either
+    L = lattice_clouds(2, 5, gen, dtype=DTYPE)
+    gl0 = build_local_graph(L, candidate_k=32)
+    gl1 = build_local_graph(L[:, torch.randperm(L.shape[1], generator=gen)],
+                            candidate_k=32)
+    torch.testing.assert_close(gl1.radius, gl0.radius, rtol=1e-12, atol=1e-12)
+
+
+def test_required_candidate_k_is_the_actionable_budget():
+    """candidate_k is a memory budget, not a model parameter: the graph
+    reports exactly how large it has to be, and meeting it zeroes the
+    truncation."""
+    gen = torch.Generator().manual_seed(2)
+    P = torch.randn(2, 256, 3, generator=gen, dtype=DTYPE)
+    starved = build_local_graph(P, candidate_k=4, target_k=32)
+    assert starved.truncation_frac > 0.0
+    assert starved.candidate_k == 4 and starved.required_candidate_k > 4
+
+    ok = build_local_graph(P, candidate_k=starved.required_candidate_k,
+                           target_k=32)
+    assert ok.truncation_frac == 0.0
+    assert abs(ok.mean_degree - 32) <= 0.15 * 32
+
+
+def test_candidate_budget_beyond_the_support_changes_nothing():
+    """The reason the budget is only a budget: candidates outside the support
+    have window 0, so any k >= required gives the SAME graph.  This is what
+    makes a fixed, generous candidate_k safe."""
+    gen = torch.Generator().manual_seed(3)
+    P = torch.randn(2, 200, 3, generator=gen, dtype=DTYPE)
+    ref = build_local_graph(P, candidate_k=64)
+    assert ref.truncation_frac == 0.0
+    need = ref.required_candidate_k
+    for k in (need, 100, 199):
+        g = build_local_graph(P, candidate_k=k)
+        assert g.truncation_frac == 0.0
+        torch.testing.assert_close(g.window[..., :need], ref.window[..., :need],
+                                   rtol=0, atol=0)
+        extra = g.window[..., need:]
+        assert extra.numel() == 0 or extra.abs().max().item() == 0.0
+
+
+def test_default_candidate_k_covers_the_default_radius():
+    """The measured claim behind the default: at candidate_k = 64 the
+    degree-matched radius truncates nothing, on every shape family in the
+    suite."""
+    gen = torch.Generator().manual_seed(4)
+    clouds = [torch.randn(2, n, 3, generator=gen, dtype=DTYPE)
+              for n in (32, 128, 512)]
+    clouds += [_surface_cloud(512, gen), _curve_cloud(256, gen),
+               lattice_clouds(2, 5, gen, dtype=DTYPE),
+               symmetric_clouds(2, 128, gen, dtype=DTYPE),
+               c2_clouds(2, 128, gen, dtype=DTYPE),
+               tetra_orbit_clouds(2, 120, gen, dtype=DTYPE)]
+    for P in clouds:
+        g = build_local_graph(P)                      # all defaults
+        assert g.truncation_frac == 0.0, \
+            f'N={P.shape[1]} needs candidate_k {g.required_candidate_k}'
+        assert g.required_candidate_k <= 64
 
 
 def test_edge_wrench_obeys_the_coadjoint_law():
@@ -65,8 +212,8 @@ def test_edge_wrench_obeys_the_coadjoint_law():
     enc = LocalWrenchSetEncoder().to(DTYPE)
     R, p = random_SE3(1.0, gen, dtype=DTYPE)
     Pt = transform_cloud(P, R, p)
-    w0 = enc.edge_wrenches(P, build_local_graph(P, candidate_k=16))
-    wt = enc.edge_wrenches(Pt, build_local_graph(Pt, candidate_k=16))
+    w0 = enc.edge_wrenches(P, build_local_graph(P, candidate_k=64))
+    wt = enc.edge_wrenches(Pt, build_local_graph(Pt, candidate_k=64))
     rho = coadjoint(R, p)
     expected = torch.einsum('ij,bnkj->bnki', rho, w0)
     assert scaled_err(wt, expected) < 1e-12
@@ -107,6 +254,7 @@ VARIANTS = [
     {'beta_mode': 'uniform'},
     {'use_force_invariant': True},
     {'radius_mode': 'density_scaled'},
+    {'radius_mode': 'global_scale'},
     {'radius_mode': 'knn_adaptive'},
     {'radius_mode': 'knn_shell'},
     {'radius_mode': 'fixed', 'radius_value': 1.0},
@@ -189,7 +337,7 @@ def test_exact_distance_ties_do_not_change_the_stiffness():
     neighbour rank as a channel index is not."""
     gen = torch.Generator().manual_seed(23)
     P = lattice_clouds(2, 3, gen, dtype=DTYPE, trans_scale=1.0)
-    model = _model(candidate_k=16)
+    model = _model(candidate_k=64)
     K = model(P)
     perm = torch.randperm(P.shape[1], generator=gen)
     assert scaled_err(model(P[:, perm]), K) < 1e-11
