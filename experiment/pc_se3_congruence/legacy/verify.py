@@ -1,12 +1,13 @@
-"""Numerical verification of congruence equivariance (experiments A, B, C).
+"""[SUPERSEDED gen-1 -> verify_pointwise.py]
+Numerical verification of congruence equivariance (experiments A, B, C).
 
 Run from the repo root:
-    python experiment/pc_se3_congruence/verify.py
+    python experiment/pc_se3_congruence/legacy/verify.py
 
 All computations in float64, random (untrained) weights, CPU.  Each experiment
 block reseeds (0/1/2/3/4) so that adding a check to one block cannot shift the
 RNG stream, and hence the reported numbers, of the others.
-Results are printed and dumped to experiment/pc_se3_congruence/results.json.
+Results are printed and dumped to experiment/pc_se3_congruence/legacy/results.json.
 """
 import json
 import os

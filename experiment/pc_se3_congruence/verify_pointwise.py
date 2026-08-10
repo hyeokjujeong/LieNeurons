@@ -1,4 +1,5 @@
-"""Structural verification of the pointwise wrench -> stiffness pipeline.
+"""[CURRENT ENTRY POINT]
+Structural verification of the pointwise wrench -> stiffness pipeline.
 
 Runs the checks that must hold BEFORE any training number is meaningful, and
 prints the rank-channel comparison arm next to the new model so the two failure

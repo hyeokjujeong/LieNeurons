@@ -1,31 +1,36 @@
-"""se(3) utilities for the congruence-equivariance experiments.
+"""[SHARED UTIL] se(3) utilities for the congruence-equivariance experiments.
 
-Storage convention (repo convention, matches core.lie_alg_util.HatLayer('se3')):
-    xi = [v ; omega] in R^6,  x[..., 0:3] = v (linear / moment),
-                              x[..., 3:6] = omega (angular / direction).
+STORAGE CONVENTION -- ANGULAR / MOMENT FIRST.  The whole repository uses
 
+    twist   xi = [omega ; v]   x[..., 0:3] = omega (angular)
+                               x[..., 3:6] = v     (linear)
+    wrench  F  = [m ; f]       F[..., 0:3] = m     (moment)
+                               F[..., 3:6] = f     (force)
+
+matching core.lie_alg_util.HatLayer('se3') / vee_se3 and the report documents.
 In this ordering the adjoint of T = (R, p) acting on twists is
 
-    Ad_T = [ R   p^ R ]
-           [ 0    R   ],
+    Ad_T = [  R    0 ]                  Ad_T^{-T} = [ R  p^ R ]
+           [ p^ R  R ],                             [ 0   R   ]
 
-the Klein form Gram matrix is Q = [[0, I], [I, 0]] (so that
-xi1^T Q xi2 = omega1 . v2 + omega2 . v1), and Q^{-1} = Q.
+with the coupling block LOWER LEFT for twists and UPPER RIGHT for wrenches, so
+omega (twist slot 0:3) and f (wrench slot 3:6) are the translation-blind ones.
+The Klein form Gram matrix is Q = [[0, I], [I, 0]] (so that
+xi1^T Q xi2 = omega1 . v2 + omega2 . v1) and Q^{-1} = Q.
 
-NOTE ON CONVENTIONS.  docs/pc_se3_congruence_report.md (like exp.md and
-pc_to_se3_mapping_en.pdf) writes twists ANGULAR-FIRST, xi = [omega; v], where
-the adjoint reads
+Consequently the 6x6 stiffness K = L L^T built from wrench factors has
 
-    Ad_T = [  R    0 ]
-           [ p^ R  R ]
+    K[0:3, 0:3] = mm  (rotational)      K[3:6, 3:6] = ff  (translational).
 
-with the coupling block in the lower left.  The two orders are conjugate by the
-block-swap permutation Pi = [[0, I], [I, 0]]:  Ad^[omega;v] = Pi Ad^[v;omega] Pi.
-Q is numerically the same matrix in both orders (it IS the swap), so the head
-Y = Q Z needs no adjustment.  Relative errors, ranks, dimensions, signatures and
-eigenvalues are all invariant under Pi-conjugation, so no reported number
-depends on the choice.  This module stays in [v; omega] because that is what
-HatLayer('se3') / vee_se3 in core/lie_alg_util.py consume.
+HISTORY.  This module (and the rest of the pipeline) previously stored
+LINEAR-FIRST, xi = [v; omega], F = [f; m], with the coupling blocks mirrored.
+The two orders are conjugate by the block-swap permutation Pi = [[0, I], [I, 0]]:
+Ad^[omega;v] = Pi Ad^[v;omega] Pi.  Q is numerically the same matrix in both
+(it IS the swap), so the head Y = Q Z needed no adjustment.  Relative errors,
+ranks, dimensions, signatures and eigenvalues are all invariant under
+Pi-conjugation, so no reported NUMBER changed with the switch -- only which
+block is called ff and which mm.  Datasets written before the switch are
+converted on load; see data_loader/peg_hole_data_loader.py.
 """
 import torch
 
@@ -62,11 +67,16 @@ def compose(T1, T2):
 
 
 def adjoint(R, p):
-    """6x6 adjoint in [v; omega] order."""
+    """6x6 adjoint on twists stored [omega; v]:
+
+        omega -> R omega,    v -> R v + p x R omega,
+
+    i.e. [[R, 0], [p^ R, R]] — the coupling sits LOWER LEFT, so the angular
+    slot is the translation-blind one."""
     A = torch.zeros(6, 6, dtype=R.dtype, device=R.device)
     A[0:3, 0:3] = R
     A[3:6, 3:6] = R
-    A[0:3, 3:6] = hat3(p) @ R
+    A[3:6, 0:3] = hat3(p) @ R
     return A
 
 
@@ -77,11 +87,11 @@ def adjoint_inv(R, p):
 
 
 def coadjoint(R, p):
-    """6x6 coadjoint Ad_T^{-T} acting on wrenches stored [f; m]:
+    """6x6 coadjoint Ad_T^{-T} acting on wrenches stored [m; f]:
 
-        f -> R f,        m -> R m + p x R f,
+        m -> R m + p x R f,        f -> R f,
 
-    i.e. the block matrix [[R, 0], [p^ R, R]] — the mirror image of adjoint():
+    i.e. the block matrix [[R, p^ R], [0, R]] — the mirror image of adjoint():
     for twists the angular slot is translation-blind, for wrenches the force
     slot is.  Numerically adjoint_inv(R, p)^T (closed form, no solve)."""
     return adjoint_inv(R, p).transpose(-1, -2)

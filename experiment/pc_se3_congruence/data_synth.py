@@ -1,12 +1,21 @@
-"""Synthetic point-cloud -> stiffness data for the Experiment-B training run.
+"""[CURRENT] Synthetic cloud generators and analytic stiffness targets.
+
+Despite the Experiment-B origin described below, this module is on the current
+path and has no replacement: it supplies the abstract-cloud datasets
+(``sample_clouds`` / ``symmetric_clouds`` / ``c2_clouds`` / ``tetra_orbit_clouds``
+/ ``lattice_clouds``) and the analytic contact-spring targets used by
+``blockage_bench.py``, ``verify_pointwise.py``, ``peg_hole_synth.py`` and the
+pointwise test suite.  The realistic peg-and-hole scenes in ``peg_hole_synth.py``
+ADD to these rather than replace them -- the symmetric and lattice clouds are
+what make rank collapse and exact distance ties reproducible in isolation.
 
 Two ground-truth generators, both exactly congruence-equivariant by
-construction (K(T.P) = Ad_T^{-T} K(P) Ad_T^{-1} in the [f; m] wrench basis,
+construction (K(T.P) = Ad_T^{-T} K(P) Ad_T^{-1} in the [m; f] wrench basis,
 matching the output basis of KleinHeadB):
 
   (1) contact_spring_K — analytic, model-independent target.  Pose-free
       adaptation of docs/exp.md section 7.6: every kNN pair (i, j) contributes
-      a zero-pitch "contact spring" wrench  w_ij = (f, m) = (d_ij, r_i x d_ij)
+      a zero-pitch "contact spring" wrench  w_ij = (m, f) = (r_i x d_ij, d_ij)
       with an SE(3)-invariant weight k(||d_ij||),
 
           K(P) = (1 / N k) sum_ij  k(||d_ij||) w_ij w_ij^T .
@@ -159,10 +168,10 @@ def lattice_clouds(n_samples, n_side=3, gen=None, dtype=torch.float64,
 
 
 def contact_spring_K(P, k=12, sigma_k=0.5):
-    """Analytic congruence-equivariant SPD target, [S, 6, 6] in [f; m] order.
+    """Analytic congruence-equivariant SPD target, [S, 6, 6] in [m; f] order.
 
     P: [S, N, 3].  For each point and its k nearest neighbors:
-    w = (f, m) = (d_ij, r_i x d_ij), weight exp(-||d_ij||^2 / (2 sigma_k^2)).
+    w = (m, f) = (r_i x d_ij, d_ij), weight exp(-||d_ij||^2/(2 sigma_k^2)).
     """
     S, N, _ = P.shape
     idx = knn_indices(P, k)                                      # [S, N, k]
@@ -170,7 +179,7 @@ def contact_spring_K(P, k=12, sigma_k=0.5):
                        idx.unsqueeze(-1).expand(S, N, k, 3))
     d = nbr - P.unsqueeze(2)                                     # [S, N, k, 3]
     m = torch.cross(P.unsqueeze(2).expand_as(d), d, dim=-1)      # r_i x d_ij
-    w = torch.cat([d, m], dim=-1)                                # [S, N, k, 6]
+    w = torch.cat([m, d], dim=-1)                                # [S, N, k, 6]
     kw = torch.exp(-(d * d).sum(-1) / (2.0 * sigma_k ** 2))      # [S, N, k]
     K = torch.einsum('snk,snki,snkj->sij', kw, w, w) / (N * k)
     return 0.5 * (K + K.transpose(-1, -2))
@@ -191,7 +200,7 @@ def contact_spring_all_pairs_K(P, sigma_k=0.5):
     d = d[:, mask].reshape(S, N * (N - 1), 3)
     r = r[:, mask].reshape(S, N * (N - 1), 3)
     m = torch.cross(r, d, dim=-1)
-    w = torch.cat([d, m], dim=-1)
+    w = torch.cat([m, d], dim=-1)
     kw = torch.exp(-d.square().sum(-1) / (2.0 * sigma_k ** 2))
     K = torch.einsum('se,sei,sej->sij', kw, w, w) / (N * (N - 1))
     return 0.5 * (K + K.transpose(-1, -2))
@@ -213,7 +222,7 @@ def contact_spring_kernel_K(P, candidate_k=32, sigma_k=0.5):
                        idx.unsqueeze(-1).expand(S, N, edge_k, 3))
     d = nbr - P.unsqueeze(2)
     m = torch.cross(P.unsqueeze(2).expand_as(d), d, dim=-1)
-    w = torch.cat([d, m], dim=-1)
+    w = torch.cat([m, d], dim=-1)
     sqdist = d.square().sum(-1)
     radial = torch.exp(-sqdist / (2.0 * sigma_k ** 2))
     window = compact_wendland_weights(sqdist, candidate_dim=-1)

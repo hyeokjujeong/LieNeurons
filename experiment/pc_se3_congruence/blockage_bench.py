@@ -1,4 +1,5 @@
-"""Blockage failure-scenario benchmark with wandb monitoring.
+"""[CURRENT ENTRY POINT]
+Blockage failure-scenario benchmark with wandb monitoring.
 
 Datasets (bracket_blockage_analysis.md §6):
   centro : centro-symmetric clouds {±a_i} + eta*noise — rank(K) <= 3 at eta=0,
@@ -39,11 +40,14 @@ Examples:
       --encoder pointwise --method covector --target-graph teacher
   python experiment/pc_se3_congruence/blockage_bench.py --suite            # 표준 그리드
   python experiment/pc_se3_congruence/blockage_bench.py --dataset fiber   # 학습 없음
-  # 저장된 peg-and-hole PCD 데이터셋 (data_gen/gen_peg_hole_pcd.py로 생성) +
-  # 저장 라벨 K_contact + lambda*K_body; 512점으로 sensor-subsample
-  python experiment/pc_se3_congruence/blockage_bench.py --dataset peghole \
-      --encoder pointwise --method covector --target-graph stored \
-      --peghole-n-points 512
+  # 디스크 데이터셋 + 저장 라벨.  경로 하나로 peg-and-hole 샤드 데이터셋과
+  # 직접 준비한 (cloud, K) 파일을 모두 받는다 (형식은 경로를 보고 판별).
+  python experiment/pc_se3_congruence/blockage_bench.py \
+      --data-path data/peg_hole/v2 --n-points 512 \
+      --encoder pointwise --method covector --target-graph stored
+  python experiment/pc_se3_congruence/blockage_bench.py \
+      --data-path mydata.npz \
+      --encoder pointwise --method covector --target-graph stored
   ... --wandb-mode disabled  (wandb 없이 stdout만)
 """
 import argparse
@@ -55,7 +59,7 @@ import torch
 
 torch.set_default_dtype(torch.float64)
 
-from data_loader.peg_hole_data_loader import load_peg_hole_split
+from data_loader.pc_stiffness_data_loader import load_split
 from experiment.pc_se3_congruence.data_synth import (c2_clouds,
                                                      contact_spring_all_pairs_K,
                                                      contact_spring_K,
@@ -80,7 +84,8 @@ from experiment.pc_se3_congruence.models import (DualBackbone, GateBackbone,
                                                    WrenchSecondMomentModel)
 from experiment.pc_se3_congruence.pointwise_models import (
     PointwiseStiffnessModel, bounded_invariant, force_pair, klein_pair)
-from experiment.pc_se3_congruence.train import EIG_CLAMP, affine_invariant_d
+from experiment.pc_se3_congruence.spd_loss import (EIG_CLAMP,
+                                                     affine_invariant_d)
 
 DATASETS = {
     'centro': symmetric_clouds,
@@ -294,25 +299,28 @@ def load_reference_levels(args):
 
 def run_training(args, wb):
     K_stored, stage_va = None, None
-    if args.dataset == 'peghole':
-        # Stored peg-and-hole scenes (data_gen/gen_peg_hole_pcd.py):
-        # train/val come from their own on-disk splits, optionally
-        # sensor-subsampled to --peghole-n-points.  --n-points is unused here.
-        np_arg = args.peghole_n_points
-        kw = dict(seed=args.data_seed, lambda_body=args.lambda_body,
-                  relabel=not args.peghole_no_relabel, device=args.device)
-        P_tr_, K_tr_ = load_peg_hole_split(
-            args.peghole_root, 'train', n=args.n_train, n_points=np_arg, **kw)
-        # extras only on val: the stage id localizes which regime fails
-        # (free has no contact at all, insert is contact-dominated), which a
-        # single pooled val_d hides.
-        P_va_, K_va_, info_va = load_peg_hole_split(
-            args.peghole_root, 'val', n=args.n_val, n_points=np_arg,
-            extras=True, **kw)
-        stage_va = info_va['stage'].to(args.device)
+    if args.data_path:
+        # On-disk dataset.  load_split picks the format from the path, so
+        # peg-and-hole and bring-your-own take the same branch here.
+        kw = dict(seed=args.data_seed, n_points=args.n_points,
+                  val_frac=args.val_frac, lambda_body=args.lambda_body,
+                  relabel=not args.no_relabel, device=args.device)
+        # 0 이하는 "있는 만큼 전부" — 데이터셋 크기를 미리 모를 때 쓴다.
+        n_tr = args.n_train if args.n_train > 0 else None
+        n_va = args.n_val if args.n_val > 0 else None
+        P_tr_, K_tr_, _ = load_split(args.data_path, 'train', n=n_tr, **kw)
+        # info 는 val 에서만 쓴다: stage id 가 어느 구간이 실패하는지 국소화하며
+        # (free 는 접촉이 아예 없고 insert 는 접촉 지배), 뭉뚱그린 val_d 는 이를
+        # 가린다.  이 정보가 없는 형식이면 그냥 비어 있다.
+        P_va_, K_va_, info_va = load_split(args.data_path, 'val', n=n_va, **kw)
+        if 'stage' in info_va:
+            stage_va = info_va['stage'].to(args.device)
         P = torch.cat([P_tr_, P_va_]).to(args.device)
         K_stored = torch.cat([K_tr_, K_va_]).to(args.device)
-        print(f'[peghole] root={args.peghole_root}  N={P.shape[1]}  '
+        # 아래 학습 루프는 args.n_train/n_val 로 이 텐서를 다시 자른다.  "있는
+        # 만큼 전부"(0) 를 그대로 두면 train 슬라이스가 비어 배치가 0개가 된다.
+        args.n_train, args.n_val = P_tr_.shape[0], P_va_.shape[0]
+        print(f'[data] {args.data_path}  N={P.shape[1]}  '
               f'train/val={args.n_train}/{args.n_val}')
     else:
         gen = torch.Generator().manual_seed(args.data_seed)
@@ -436,8 +444,8 @@ def run_training(args, wb):
                **head_diagnostics(model, P_va),
                **ref,
                'f_signal': f_signal(model, P_va[:64],
-                                    slice(0, 3) if args.method == 'covector'
-                                    else slice(3, 6)),   # covector:[f;m] / vector:[v;w]
+                                    slice(3, 6) if args.method == 'covector'
+                                    else slice(0, 3)),   # covector:[m;f] / vector:[w;v]
                **block_metrics(K_pred, K_va),
                # graph_truncation_frac > 0 이면 support 안의 이웃이 top-k에서
                # 잘려나갔다는 뜻 — set-equivariance 보장이 깨진다.
@@ -465,8 +473,8 @@ def run_training(args, wb):
             print(f'ep {ep:4d}  train d {log["train_d"]:8.3f}  '
                   f'val d {log["val_d"]:8.3f}{rel}  '
                   f'scale {log["d_scale"]:6.3f}  shape {log["d_shape"]:6.3f}  '
-                  f'ff {log["err_rel_ff"]:.3f}  '
-                  f'mm {log["err_rel_mm"]:.3f}  rank {log["rank_pred"]:.1f}  '
+                  f'mm {log["err_rel_mm"]:.3f}  '
+                  f'ff {log["err_rel_ff"]:.3f}  rank {log["rank_pred"]:.1f}  '
                   f'clamp {log["clamped"]:5d}  |g| {log["grad_norm"]:.2e}  '
                   + (f'βσ {log["beta_scene_std"]:.2e}  '
                      f'inv {log["head_inv_abs"]:.2e}  '
@@ -474,8 +482,8 @@ def run_training(args, wb):
                   + f'|f_c| {log["f_signal"]:.4f}{extra}', flush=True)
             if stage_va is not None:
                 print('            stage  ' + '  '.join(
-                    f'{s}: d {log[f"{s}/val_d"]:6.3f} ff {log[f"{s}/err_rel_ff"]:.3f}'
-                    f' mm {log[f"{s}/err_rel_mm"]:.3f}'
+                    f'{s}: d {log[f"{s}/val_d"]:6.3f} mm {log[f"{s}/err_rel_mm"]:.3f}'
+                    f' ff {log[f"{s}/err_rel_ff"]:.3f}'
                     for s in STAGES if log.get(f'{s}/n')), flush=True)
     eq1 = equiv_check(args, model, P_va[:32])
     print(f'학습 후 equivariance: {eq1:.2e}')
@@ -548,87 +556,112 @@ def main():
     pre.add_argument('--recipe', default='toy', choices=list(RECIPES))
     pre_args, _ = pre.parse_known_args()
 
-    ap = argparse.ArgumentParser(parents=[pre])
+    ap = argparse.ArgumentParser(
+        parents=[pre],
+        description=(
+            '등변 강성 학습 벤치. 하나의 드라이버가 여러 실험을 겸하므로 '
+            '플래그가 많다 — 아래 그룹 중 자기 실험에 해당하는 것만 보면 된다.'),
+        epilog=(
+            '자주 쓰는 조합:\n'
+            '  디스크 데이터셋 (권장 진입점: train.py)\n'
+            '    --data-path <경로> --n-points 1024\n'
+            '    --encoder pointwise --method covector --target-graph stored\n'
+            '  합성 대칭 클라우드 스위트\n'
+            '    --suite --encoder pointwise --method covector\n'),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    ph = ap.add_argument_group('디스크 데이터셋 (--data-path)')
+    ds = ap.add_argument_group('합성 데이터셋과 타깃')
+    md = ap.add_argument_group('모델 구성')
+    ts = ap.add_argument_group('tensor 인코더 전용 (--encoder tensor)')
+    tr = ap.add_argument_group('학습과 실행')
+    wb = ap.add_argument_group('wandb')
     ap.add_argument('--dataset', default='centro',
-                    choices=list(DATASETS) + ['fiber', 'peghole'],
-                    help=('peghole: 저장된 peg-and-hole 표면 PCD 데이터셋 '
-                          '(data_gen/gen_peg_hole_pcd.py로 생성)'))
-    ap.add_argument('--peghole-root', default='data/peg_hole/v1',
-                    help='peghole 데이터셋 디렉터리 (meta.json 위치)')
-    ap.add_argument('--peghole-n-points', type=int, default=None,
-                    help=('peghole cloud를 점 n개로 서브샘플 (기본: 저장된 '
-                          '해상도 그대로; --n-points는 peghole에 미적용). '
-                          '권장 1024 — 라벨 구조가 온전하면서 학습이 현실적'))
-    ap.add_argument('--peghole-no-relabel', action='store_true',
+                    choices=list(DATASETS) + ['fiber'],
+                    help=('그 자리에서 생성하는 합성 cloud. --data-path 를 주면 '
+                          '무시되고 디스크에서 읽는다'))
+    ph.add_argument('--data-path',
+                    help=('디스크 데이터셋 경로. meta.json 이 있으면 peg-and-hole '
+                          '샤드 데이터셋이고, 아니면 points [S,N,3] 와 K [S,6,6] '
+                          '이 든 .npz/.pt 파일(또는 train/val 이 든 디렉터리)로 '
+                          '읽는다. 형식과 K 의 블록 순서는 '
+                          'data_loader/pc_stiffness_data_loader.py 참조. '
+                          '--target-graph stored 와 함께 쓴다'))
+    ph.add_argument('--val-frac', type=float, default=0.1,
+                    help=('경로가 파일 하나일 때 val 로 뗄 비율 (디렉터리나 '
+                          'peg-hole 데이터셋이면 무시된다)'))
+    ph.add_argument('--no-relabel', action='store_true',
                     help=('서브샘플에서 라벨을 재계산하지 않고 저장 라벨(full '
                           'cloud 기준)을 그대로 쓴다. 회귀가 ill-posed해지므로 '
-                          '비교 목적으로만 사용'))
-    ap.add_argument('--lambda-body', type=float, default=None,
-                    help=('peghole 타깃 K = K_contact + lambda*K_body의 '
+                          '비교 목적으로만 사용 (peg-hole 전용)'))
+    ph.add_argument('--lambda-body', type=float, default=None,
+                    help=('peg-hole 타깃 K = K_contact + lambda*K_body의 '
                           'lambda (기본: meta.json의 캘리브레이션 값)'))
-    ap.add_argument('--encoder', default='plueck',
+    md.add_argument('--encoder', default='plueck',
                     choices=['plueck', 'learnable', 'bracket', 'tensor',
                              'pointwise'],
                     help=('plueck: 기존 global mean / learnable: VN lift 뒤 global mean / '
                           'bracket: pooling-전 bracket / tensor: edge를 유지해 ww^T late pooling / '
                           'pointwise: set pooling + point축 유지 LN backbone + late second moment'))
-    ap.add_argument('--nonlinear', default='bracket',
+    md.add_argument('--nonlinear', default='bracket',
                     choices=['bracket', 'gate', 'dual'],
                     help='백본 비선형성: bracket(기존) / gate(Gram gate로 교체) / dual(병렬 두 브랜치+bracket 병합)')
-    ap.add_argument('--method', default='vector', choices=['vector', 'covector'],
+    md.add_argument('--method', default='vector', choices=['vector', 'covector'],
                     help='vector: twist(adjoint) 입력 + Klein head / covector: wrench(coadjoint) 입력')
-    ap.add_argument('--eta', type=float, default=0.0)
-    ap.add_argument('--epochs', type=int, default=150)
-    ap.add_argument('--batch', type=int, default=32)
-    ap.add_argument('--lr', type=float, default=3e-4)
-    ap.add_argument('--n-train', type=int, default=512)
-    ap.add_argument('--n-val', type=int, default=128)
-    ap.add_argument('--n-points', type=int, default=64)
-    ap.add_argument('--k-enc', type=int, default=8)
-    ap.add_argument('--k-gt', type=int, default=8)
-    ap.add_argument('--sigma-k', type=float, default=0.5)
-    ap.add_argument('--target-graph', default='knn',
+    ds.add_argument('--eta', type=float, default=0.0)
+    tr.add_argument('--epochs', type=int, default=150)
+    tr.add_argument('--batch', type=int, default=32)
+    tr.add_argument('--lr', type=float, default=3e-4)
+    ds.add_argument('--n-train', type=int, default=512)
+    ds.add_argument('--n-val', type=int, default=128)
+    ds.add_argument('--n-points', type=int, default=None,
+                    help=('cloud 해상도. 생성 데이터셋은 만들 점 개수(기본 64), '
+                          '디스크 데이터셋은 서브샘플 목표(기본: 저장된 그대로). '
+                          '서브샘플은 라벨을 재계산할 수 있는 형식에서만 된다'))
+    md.add_argument('--k-enc', type=int, default=8)
+    ds.add_argument('--k-gt', type=int, default=8)
+    ds.add_argument('--sigma-k', type=float, default=0.5)
+    ds.add_argument('--target-graph', default='knn',
                     choices=['knn', 'kernel', 'all', 'teacher', 'stored'],
                     help=('GT contact spring graph; kernel은 local compact window, '
                           'all은 exact-tie 대조군, teacher는 같은 클래스의 고정 '
                           '난수 모델(realizability 검증, pointwise 전용), '
                           'stored는 peghole 데이터셋의 저장 라벨 '
                           'K_contact + lambda*K_body (peghole 전용)'))
-    ap.add_argument('--teacher-seed', type=int, default=7,
+    ds.add_argument('--teacher-seed', type=int, default=7,
                     help='--target-graph teacher의 고정 teacher 모델 seed')
-    ap.add_argument('--target-batch', type=int, default=64,
+    ds.add_argument('--target-batch', type=int, default=64,
                     help='GT 생성 chunk 크기 (all-pairs 메모리 제어)')
-    ap.add_argument('--eval-batch', type=int, default=64,
+    tr.add_argument('--eval-batch', type=int, default=64,
                     help=('검증 forward chunk 크기. 그래프가 [B,N,N] 거리행렬을 '
                           '만들므로 n_val 전체를 한 번에 돌리면 N=1024, '
                           'n_val=2048에서 16 GiB를 요구한다 (숫자는 불변, '
                           '최대 메모리만 달라진다)'))
-    ap.add_argument('--lift-hidden', type=int, default=8,
+    md.add_argument('--lift-hidden', type=int, default=8,
                     help='learnable VN lift의 hidden channel 수')
-    ap.add_argument('--tensor-graph', default='all',
+    ts.add_argument('--tensor-graph', default='all',
                     choices=['knn', 'kernel', 'all'],
                     help=('tensor edge graph; kernel은 bounded local 후보와 '
                           'smooth zero-boundary window 사용'))
-    ap.add_argument('--kernel-candidates', type=int, default=None,
+    ts.add_argument('--kernel-candidates', type=int, default=None,
                     help=('kernel graph의 최대 local 후보 수; 기본값은 4*k-enc. '
                           'N-1보다 크면 자동으로 줄임'))
-    ap.add_argument('--tensor-weight', default='learned',
+    ts.add_argument('--tensor-weight', default='learned',
                     choices=['learned', 'analytic', 'uniform'],
                     help='2차 pooling의 invariant radial weight')
-    ap.add_argument('--tensor-hidden', type=int, default=32,
+    ts.add_argument('--tensor-hidden', type=int, default=32,
                     help='learned tensor radial MLP hidden channel 수')
-    ap.add_argument('--tensor-backbone', default='none',
+    ts.add_argument('--tensor-backbone', default='none',
                     choices=['none', 'covector'],
                     help=('none: radial second moment 직접 pooling; covector: '
                           'pooling 전에 LNLinear+covector-bracket stack 적용'))
-    ap.add_argument('--tensor-backbone-channels', type=int, nargs='+',
+    ts.add_argument('--tensor-backbone-channels', type=int, nargs='+',
                     default=[32, 32, 16],
                     help='tensor covector backbone의 hidden/output channel 수')
-    ap.add_argument('--channels', type=int, nargs='+', default=[8, 32, 32, 16])
+    md.add_argument('--channels', type=int, nargs='+', default=[8, 32, 32, 16])
 
     # ------------------------------------------------ encoder=pointwise 전용
     # 축 규약: N=point, k=neighbor(집합), C=latent channel, H=factor, K=6x6 강성
-    pw = ap.add_argument_group('pointwise pipeline')
+    pw = ap.add_argument_group('pointwise 파이프라인 전용 (--encoder pointwise)')
     pw.add_argument('--pw-channels', type=int, nargs='+', default=[8, 16, 32, 16],
                     help='[C_0(set pooling), C_1, ...]; 권장 8-16-32-16')
     pw.add_argument('--pw-factors', type=int, default=8, help='factor 채널 H')
@@ -692,20 +725,20 @@ def main():
                     help='factor별 positive weight beta_ih')
     pw.add_argument('--pw-force-invariant', action='store_true',
                     help='gate/head 불변량에 f_c . f_d 계열 추가')
-    ap.add_argument('--baseline-json',
+    tr.add_argument('--baseline-json',
                     help=('peghole_baseline.py가 낸 json. Frechet 기준선과 라벨 '
                           'MC 잡음을 읽어 val_d_rel(기준선 대비 비율)을 '
                           '지표로 만든다. --target-graph stored에만 적용'))
-    ap.add_argument('--ckpt-out',
+    tr.add_argument('--ckpt-out',
                     help='val_d 최저점의 state_dict 저장 경로 (없으면 저장 안 함)')
-    ap.add_argument('--data-seed', type=int, default=100)
-    ap.add_argument('--model-seed', type=int, default=0)
-    ap.add_argument('--device',
+    ds.add_argument('--data-seed', type=int, default=100)
+    md.add_argument('--model-seed', type=int, default=0)
+    tr.add_argument('--device',
                     default='cuda' if torch.cuda.is_available() else 'cpu')
-    ap.add_argument('--wandb-mode', default='online',
+    wb.add_argument('--wandb-mode', default='online',
                     choices=['online', 'offline', 'disabled'])
-    ap.add_argument('--wandb-project', default=WANDB_PROJECT)
-    ap.add_argument('--wandb-entity', default=WANDB_ENTITY)
+    wb.add_argument('--wandb-project', default=WANDB_PROJECT)
+    wb.add_argument('--wandb-entity', default=WANDB_ENTITY)
     ap.add_argument('--suite', action='store_true',
                     help='표준 그리드 실행 (각각 별도 wandb run)')
     ap.add_argument('--quick', action='store_true')
@@ -745,12 +778,18 @@ def one(args):
             raise ValueError('pointwise 백본의 비선형성은 --pw-bracket / --pw-gate로 지정합니다')
     if args.target_graph == 'teacher' and args.encoder != 'pointwise':
         raise ValueError('--target-graph teacher는 --encoder pointwise 전용입니다')
-    if args.target_graph == 'stored' and args.dataset != 'peghole':
-        raise ValueError('--target-graph stored는 --dataset peghole 전용입니다')
-    if args.dataset == 'peghole' and args.target_graph in ('knn', 'all'):
-        print('[peghole] 경고: 저장 라벨 대신 on-the-fly '
+    if args.target_graph == 'stored' and not args.data_path:
+        raise ValueError('--target-graph stored는 --data-path 가 필요합니다 '
+                         '(라벨을 디스크에서 읽는 경로)')
+    if args.data_path and args.target_graph in ('knn', 'all'):
+        print('[data] 경고: 저장 라벨 대신 on-the-fly '
               f'{args.target_graph} 타깃을 사용합니다 (대조군 용도)')
-    if args.dataset == 'tetra' and args.n_points % 12 != 0:
+    if args.n_points is None:
+        # 생성 데이터셋은 크기를 정해 줘야 하고, 디스크 데이터셋은 저장된
+        # 해상도를 그대로 쓴다 (None 이 곧 "건드리지 않음").
+        if not args.data_path:
+            args.n_points = 64
+    elif args.dataset == 'tetra' and args.n_points % 12 != 0:
         adj = max(12, args.n_points // 12 * 12)
         print(f'[tetra] n_points {args.n_points} -> {adj} (12의 배수 보정)')
         args.n_points = adj
@@ -765,8 +804,8 @@ def one(args):
               if args.encoder == 'pointwise' else '')
            + (f'-target-{args.target_graph}'
               if args.target_graph != 'knn' else '')
-           + (f'-N{args.peghole_n_points or "full"}'
-              if args.dataset == 'peghole' else
+           + (f'-N{args.n_points or "full"}'
+              if args.data_path else
               f'-eta{args.eta}' if args.dataset != 'iid' else
               f'-N{args.n_points}'))
     wb = init_wandb(tag, vars(args), mode=args.wandb_mode,

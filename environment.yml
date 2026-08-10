@@ -8,9 +8,11 @@ dependencies:
       # PyTorch w/ CUDA 12.8 wheels — pinned to cu128 builds so one env works on
       # RTX 30-series (sm_86), 40-series (sm_89), and 50-series (sm_120) GPUs.
       # cu128 also needs only driver r525+, unlike cu130 wheels (r580+).
-      - --extra-index-url https://download.pytorch.org/whl/cu128
-      - torch==2.11.0+cu128
-      - torchvision==0.26.0+cu128
+      - --extra-index-url https://download.pytorch.org/whl/cu128  # [not osx]
+      - torch==2.11.0+cu128  # [not osx]
+      - torchvision==0.26.0+cu128  # [not osx]
+      - torch==2.11.0  # [osx]
+      - torchvision==0.26.0  # [osx]
       # core deps (from docker/LieNeurons/Dockerfile)
       - numpy<2
       - scipy

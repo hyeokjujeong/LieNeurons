@@ -1,4 +1,5 @@
-"""Generate the peg-and-hole point-cloud -> stiffness dataset (npz shards).
+"""[CURRENT DATA]
+Generate the peg-and-hole point-cloud -> stiffness dataset (npz shards).
 
 Scenes, labels and calibration are defined in
 ``experiment/pc_se3_congruence/peg_hole_synth.py``; this script only handles
@@ -38,7 +39,9 @@ from experiment.pc_se3_congruence.peg_hole_synth import (DEFAULT_CFG, STAGES,
                                                          generate_batch,
                                                          make_cfg)
 
-VERSION = 2   # v2: area-weighted (resolution-convergent) labels
+VERSION = 3   # v3: labels in ANGULAR/MOMENT-FIRST basis, K = [[mm, mf], [fm, ff]]
+              # v2: same labels but force-first, [[ff, fm], [mf, mm]]
+              # v1: pre-area-weighting (not resolution-convergent)
 SPLITS = ('train', 'val', 'test')
 # generation order only -- val/test first so training smoke tests can start
 # while the train split is still streaming in; seeds stay order-independent

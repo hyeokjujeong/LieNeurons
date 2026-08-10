@@ -1,4 +1,4 @@
-"""Peg-and-hole synthetic point-cloud -> stiffness data.
+"""[CURRENT DATA] Peg-and-hole synthetic point-cloud -> stiffness data.
 
 Replaces the abstract Gaussian-blob clouds of :mod:`data_synth` with scenes
 that look like a real insertion task: a prismatic peg (circle / triangle /
@@ -547,7 +547,7 @@ def _pair_second_moment(P, mask, sigma, radius, candidate_k, chunk, label):
         sq = vec.square().sum(-1)
         u = vec / sq.clamp_min(1e-18).sqrt().unsqueeze(-1)
         m = torch.cross(Pc.unsqueeze(2).expand_as(u), u, dim=-1)
-        w = torch.cat([u, m], dim=-1)                            # [b, N, k, 6]
+        w = torch.cat([m, u], dim=-1)                            # [b, N, k, 6]
         q = (d / radius).clamp(max=1.0)
         window = (1.0 - q).clamp_min(0.0).pow(4) * (1.0 + 4.0 * q)
         kw = torch.exp(-sq / (2.0 * sigma ** 2)) * window * (d < radius)
@@ -562,7 +562,7 @@ def _pair_second_moment(P, mask, sigma, radius, candidate_k, chunk, label):
 
 def peg_contact_K(P, part, area_peg, area_plate, sigma_c=0.09,
                   contact_radius=None, candidate_k=160, chunk=8):
-    """Area-weighted cross-part contact stiffness, [S, 6, 6] in [f; m] order.
+    """Area-weighted cross-part contact stiffness, [S, 6, 6] in [m; f] order.
 
     ``area_peg`` / ``area_plate``: [S] true surface areas of the two parts, so
     that a point stands for A / N of surface and the sum is the Monte-Carlo

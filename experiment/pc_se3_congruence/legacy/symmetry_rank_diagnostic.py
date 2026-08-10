@@ -1,4 +1,5 @@
-"""Fast structural diagnostic for symmetry, kNN ties, and tensor pooling.
+"""[SUPERSEDED gen-2 -> verify_pointwise.py]
+Fast structural diagnostic for symmetry, kNN ties, and tensor pooling.
 
 This script does not train.  It compares four randomly initialized/fixed
 pipelines on the same exact-symmetry cloud:

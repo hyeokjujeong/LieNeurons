@@ -1,15 +1,22 @@
 #!/usr/bin/env bash
-# peg-and-hole 학습 3단계.  기본값이 곧 본학습 설정이라 인자 없이 그냥 돌리면 된다.
+# 보고서 수치를 만든 전체 프로토콜.  단계를 인자로 골라 돌린다.
+#
+# 한 번만 돌려 보려는 거라면 이 스크립트가 아니라 train.py 를 쓴다.  여기는
+# 여러 단계를 순서대로 도는 몇 시간짜리 실행이다.
+#   python experiment/pc_se3_congruence/train.py --dry-run
 #
 #   conda activate lieneurons && cd <repo 루트>
-#   bash experiment/pc_se3_congruence/run_peghole_experiments.sh
+#   bash experiment/pc_se3_congruence/run_experiments.sh            # 기본 3단계
+#   bash experiment/pc_se3_congruence/run_experiments.sh teacher stored
+#   bash experiment/pc_se3_congruence/run_experiments.sh compare
+#   bash experiment/pc_se3_congruence/run_experiments.sh verify synth-teacher
 #
-# 5-6 시간짜리다.  ssh 가 끊겨도 살아남게 하려면
-#   nohup bash experiment/pc_se3_congruence/run_peghole_experiments.sh \
+# ssh 가 끊겨도 살아남게 하려면
+#   nohup bash experiment/pc_se3_congruence/run_experiments.sh \
 #       > peghole_main.log 2>&1 &
 #   tail -f peghole_main.log
 #
-# 단계 (인자로 일부만 선택 가능: ... run_peghole_experiments.sh teacher stored)
+# ---- peg-and-hole 단계 (기본: baseline teacher stored) --------------------
 #   baseline  학습 없음. Frechet 평균 기준선(train 적합 -> val 평가)과 라벨의
 #             MC 분산.  이후 두 단계의 val_d 는 반드시 이 두 값과 함께 읽는다.
 #             서브샘플 재라벨 캐시도 여기서 데워진다.
@@ -21,18 +28,26 @@
 #             ARM_A(기본 없음) vs ARM_B(기본 --pw-force-invariant).
 #             크기 변조 경로(beta)가 살아나는지 보는 짧은 대조 실험이다.
 #
-# 그래프 플래그는 일부러 주지 않는다 — 기본값 degree_matched 가 이 데이터에서
+# ---- 합성 suite 단계 (pointwise_pipeline.md 8.3--8.5 의 출처) -------------
+#   verify          구조 검증 A--F 를 json 으로 떨군다 (VERIFY_OUT)
+#   synth-teacher   합성 cloud + teacher 타깃
+#   synth-analytic  합성 cloud + analytic contact-spring 타깃
+#   peg-and-hole 데이터셋이 필요 없다.  단계 이름이 겹치지 않게 synth- 를 붙였다.
+#
+# 합성 suite 만 그래프 플래그를 명시한다 (density_scaled/alpha 1.15/target_k 16).
+# peg-and-hole 쪽은 일부러 주지 않는다 — 기본값 degree_matched 가 이 데이터에서
 # degree ~16, truncation 0 을 준다 (구조 지표가 깨지면 나머지는 볼 필요 없음).
 #
 # 환경변수
 #   ROOT NPTS NTRAIN NVAL EPOCHS BATCH LR CH FAC SEED
-#   DEV        기본 학습 장치
+#   DEV        기본 학습 장치 (합성 suite 도 이걸 쓴다)
 #   DEV2       PARALLEL=1 일 때 stored 를 올릴 두 번째 장치
 #   PARALLEL   1 이면 teacher(DEV) 와 stored(DEV2) 를 동시에 실행
 #   WANDB_MODE online | offline | disabled
 #   OUTDIR     로그와 json 출력 경로
 #   BASELINE_JSON  기준선 json 경로 (기본: 이번 실행의 baseline 단계 출력).
 #                  학습 단계가 이걸 읽어 val_d_rel(기준선 대비 비율)을 기록한다
+#   VERIFY_OUT verify 단계의 json 출력 경로
 #   QUICK      1 이면 smoke 설정으로 덮어쓴다 (10 epoch, 소량 표본)
 
 set -euo pipefail
@@ -61,6 +76,11 @@ WANDB_MODE="${WANDB_MODE:-online}"
 OUTDIR="${OUTDIR:-experiment/pc_se3_congruence/train_results/peghole}"
 QUICK="${QUICK:-0}"
 MC_N="${MC_N:-512}"
+VERIFY_OUT="${VERIFY_OUT:-experiment/pc_se3_congruence/pointwise_verify_results.json}"
+# 합성 suite 는 peg-and-hole 과 다른 그래프 설정을 쓴다.  보고서 수치가 이 값으로
+# 나왔으므로 재현하려면 바꾸지 않는다.
+SYNTH_GRAPH=(--pw-radius-mode density_scaled --pw-radius-alpha 1.15
+             --pw-target-k 16 --pw-candidates 64)
 
 if [[ "${QUICK}" == "1" ]]; then
     NPTS="${NPTS}"; NTRAIN=64; NVAL=32; EPOCHS=2; BATCH=8; MC_N=32
@@ -74,10 +94,22 @@ fi
 for p in "${PHASES[@]}"; do
     case "${p}" in
         baseline|teacher|stored|compare) ;;
-        *) echo "알 수 없는 단계 '${p}' (baseline|teacher|stored|compare)" >&2
+        verify|synth-teacher|synth-analytic) ;;
+        *) echo "알 수 없는 단계 '${p}' (baseline|teacher|stored|compare|" \
+                "verify|synth-teacher|synth-analytic)" >&2
            exit 2 ;;
     esac
 done
+
+has_phase() { for p in "${PHASES[@]}"; do [[ "${p}" == "$1" ]] && return 0; done; return 1; }
+has_peghole() {
+    for p in baseline teacher stored compare; do has_phase "${p}" && return 0; done
+    return 1
+}
+has_synth() {
+    for p in verify synth-teacher synth-analytic; do has_phase "${p}" && return 0; done
+    return 1
+}
 
 # compare 단계의 팔들.  'skip' 으로 두면 그 팔은 돌리지 않는다.
 #   A  대조군 — 현행 그대로
@@ -118,6 +150,7 @@ for d in [dev] + ([dev2] if parallel else []):
         raise SystemExit(f'  [중단] {d} 여유 메모리가 부족하다')
 PY
 
+if has_peghole; then
 python - "${NTRAIN}" "${NPTS}" "${EPOCHS}" "${PARALLEL}" <<'PY'
 import sys
 ntr, npts, ep = (int(x) for x in sys.argv[1:4])
@@ -133,6 +166,7 @@ print(f'  {"병렬 -> 벽시계는 느린 쪽" if parallel else "순차 -> 합�
       f'약 {(sec*2.34 if parallel else sec*(1+2.34))/3600:.1f} 시간')
 print('  (N=1024/train 20480/batch 32, RTX 4090 에서 134 s/epoch 실측 기준)')
 PY
+fi
 
 mkdir -p "${OUTDIR}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -141,28 +175,28 @@ TAG="N${NPTS}-tr${NTRAIN}-ep${EPOCHS}-${STAMP}"
 # 이전 실행의 json 을 재사용하려면 BASELINE_JSON 을 직접 지정한다.
 BASELINE_JSON="${BASELINE_JSON:-${OUTDIR}/baseline-${TAG}.json}"
 
-echo "===== peg-and-hole 실험 ${TAG} ====="
-echo "  root=${ROOT}  N=${NPTS}  train/val=${NTRAIN}/${NVAL}"
+echo "===== 실험 ${TAG} ====="
 echo "  epochs=${EPOCHS} batch=${BATCH} lr=${LR} channels=[${CH}] factors=${FAC}"
 echo "  device=${DEV}$([[ "${PARALLEL}" == "1" ]] && echo " + ${DEV2} (parallel)")"
 echo "  phases=${PHASES[*]}  wandb=${WANDB_MODE}  out=${OUTDIR}"
-
+if has_peghole; then
+echo "  root=${ROOT}  N=${NPTS}  train/val=${NTRAIN}/${NVAL}"
 python - "${ROOT}" <<'PY'
 import json, sys
 m = json.load(open(sys.argv[1] + '/meta.json'))
 print(f"[dataset] version {m['version']}  stored N {m['n_points']}  "
       f"lambda {m['cfg']['lambda_body']}  "
       f"splits { {s: sum(x['n'] for x in e['shards']) for s, e in m['splits'].items()} }")
-if m['version'] != 2:
-    raise SystemExit('version 2 데이터셋이 아닙니다 -- 재생성이 필요합니다')
+# v3 부터 저장 라벨이 [m; f] 순서다.  그 아래는 로더가 로드 시점에 변환한다.
+if m['version'] < 2:
+    raise SystemExit('version 2 미만 데이터셋이다 -- 재생성이 필요하다')
 PY
-
-has_phase() { for p in "${PHASES[@]}"; do [[ "${p}" == "$1" ]] && return 0; done; return 1; }
+fi
 
 run_baseline() {
     echo -e "\n===== phase 0/2: 기준선 + 라벨 MC 분산 (학습 없음) ====="
     python experiment/pc_se3_congruence/peghole_baseline.py \
-        --peghole-root "${ROOT}" \
+        --data-path "${ROOT}" \
         --n-points "${NPTS}" \
         --n-train "${NTRAIN}" \
         --n-val "${NVAL}" \
@@ -182,11 +216,10 @@ bench() {
     local ref=()
     [[ -f "${BASELINE_JSON}" ]] && ref=(--baseline-json "${BASELINE_JSON}")
     python experiment/pc_se3_congruence/blockage_bench.py \
-        "${ref[@]}" \
+        ${ref[@]+"${ref[@]}"} \
         --ckpt-out "${OUTDIR}/${name}-${TAG}.pt" \
-        --dataset peghole \
-        --peghole-root "${ROOT}" \
-        --peghole-n-points "${NPTS}" \
+        --data-path "${ROOT}" \
+        --n-points "${NPTS}" \
         --encoder pointwise \
         --method covector \
         --target-graph "${target}" \
@@ -221,6 +254,42 @@ for split, n in (('train', int(ntr)), ('val', int(nva))):
 PY
 }
 
+# ------------------------------------------------------------- 합성 suite
+# peg-and-hole 데이터셋을 쓰지 않는다.  자기 데이터도 필요 없다.
+run_verify() {
+    echo -e "\n===== verify: 구조 검증 A--F ====="
+    python experiment/pc_se3_congruence/verify_pointwise.py \
+        --device "${DEV}" \
+        --full \
+        --n-points 128 \
+        --candidates 64 \
+        --radius-mode density_scaled \
+        --radius-alpha 1.15 \
+        --target-k 16 \
+        --out "${VERIFY_OUT}"
+}
+
+run_synth() {   # run_synth <teacher|analytic>
+    echo -e "\n===== synth-$1: 합성 cloud + $1 타깃 ====="
+    python experiment/pc_se3_congruence/run_pointwise_suite.py \
+        --phase "$1" \
+        --recipe full \
+        --device "${DEV}" \
+        --wandb-mode "${WANDB_MODE}" \
+        "${SYNTH_GRAPH[@]}"
+}
+
+if has_synth; then
+    if has_phase verify; then run_verify; fi
+    if has_phase synth-teacher; then run_synth teacher; fi
+    if has_phase synth-analytic; then run_synth analytic; fi
+    if ! has_peghole; then
+        echo -e "\n===== 완료: ${TAG} ====="
+        exit 0
+    fi
+fi
+
+# -------------------------------------------------------------- peg-and-hole
 if has_phase baseline; then
     run_baseline
 else

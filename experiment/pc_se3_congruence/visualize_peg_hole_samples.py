@@ -1,4 +1,5 @@
-"""Per-sample view of the peg-and-hole dataset: the cloud and ITS stiffness.
+"""[CURRENT TOOL]
+Per-sample view of the peg-and-hole dataset: the cloud and ITS stiffness.
 
 One row per scene.  Left: the point cloud the model actually receives (peg /
 plate coloured, at the training resolution).  Middle: the 6x6 target K as a

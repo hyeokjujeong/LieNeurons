@@ -56,31 +56,35 @@ class HatLayer(torch.nn.Module):
             self.register_buffer('E_bases', E_bases)
 
         elif algebra_type == 'se3':
-            # we use the order of v = [t, \omega]^T
+            # ANGULAR-FIRST: v = [\omega, t]^T.
+            # E1..E3 are the rotation generators, E4..E6 the translations, so
+            # slots 0:3 carry omega and slots 3:6 carry t.  (This module used
+            # to be translation-first; everything downstream -- se3_utils,
+            # the lifts, the labels and the K blocks -- moved with it.)
 
-            E1 = torch.Tensor([[0, 0, 0, 1],
-                            [0, 0, 0, 0],
-                            [0, 0, 0, 0],
-                            [0, 0, 0, 0]])
-            E2 = torch.Tensor([[0, 0, 0, 0],
-                            [0, 0, 0, 1],
-                            [0, 0, 0, 0],
-                            [0, 0, 0, 0]])
-            E3 = torch.Tensor([[0, 0, 0, 0],
-                            [0, 0, 0, 0],
-                            [0, 0, 0, 1],
-                            [0, 0, 0, 0]])
-            E4 = torch.Tensor([[0, 0, 0, 0],
+            E1 = torch.Tensor([[0, 0, 0, 0],
                             [0, 0, -1, 0],
                             [0, 1, 0, 0],
                             [0, 0, 0, 0]])
-            E5 = torch.Tensor([[0, 0, 1, 0],
+            E2 = torch.Tensor([[0, 0, 1, 0],
                             [0, 0, 0, 0],
                             [-1, 0, 0, 0],
                             [0, 0, 0, 0]])
-            E6 = torch.Tensor([[0, -1, 0, 0],
+            E3 = torch.Tensor([[0, -1, 0, 0],
                             [1, 0, 0, 0],
                             [0, 0, 0, 0],
+                            [0, 0, 0, 0]])
+            E4 = torch.Tensor([[0, 0, 0, 1],
+                            [0, 0, 0, 0],
+                            [0, 0, 0, 0],
+                            [0, 0, 0, 0]])
+            E5 = torch.Tensor([[0, 0, 0, 0],
+                            [0, 0, 0, 1],
+                            [0, 0, 0, 0],
+                            [0, 0, 0, 0]])
+            E6 = torch.Tensor([[0, 0, 0, 0],
+                            [0, 0, 0, 0],
+                            [0, 0, 0, 1],
                             [0, 0, 0, 0]])
 
             E_bases = torch.stack(
@@ -192,14 +196,15 @@ def vee_se3(M):
     # [wz ,   0, -wx,  ty]
     # [-wy,  wx,   0,  tz]
     # [  0,   0,   0,   0]
+    # ANGULAR-FIRST: v = [omega; t].
     v = torch.zeros(M.shape[:-2]+(6,), dtype=M.dtype, device=M.device)
 
-    v[..., 0] = M[..., 0, 3]
-    v[..., 1] = M[..., 1, 3]
-    v[..., 2] = M[..., 2, 3]
-    v[..., 3] = M[..., 2, 1]
-    v[..., 4] = M[..., 0, 2]
-    v[..., 5] = M[..., 1, 0]
+    v[..., 0] = M[..., 2, 1]
+    v[..., 1] = M[..., 0, 2]
+    v[..., 2] = M[..., 1, 0]
+    v[..., 3] = M[..., 0, 3]
+    v[..., 4] = M[..., 1, 3]
+    v[..., 5] = M[..., 2, 3]
     return v
 
 def vee_sp4(M):

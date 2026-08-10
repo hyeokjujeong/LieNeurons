@@ -1,4 +1,5 @@
-"""Loader for the peg-and-hole PCD -> stiffness dataset.
+"""[CURRENT DATA]
+Loader for the peg-and-hole PCD -> stiffness dataset.
 
 Shards are written by ``data_gen/gen_peg_hole_pcd.py``; the scene/label
 definitions live in ``experiment/pc_se3_congruence/peg_hole_synth.py``.
@@ -37,6 +38,20 @@ import os
 import numpy as np
 import torch
 
+# The first dataset version whose stored K is in the ANGULAR/MOMENT-FIRST
+# basis [m; f].  Anything older was written force-first and is converted on
+# load by the block swap Pi = [[0, I], [I, 0]]: K_new = Pi K_old Pi.  That is a
+# congruence by an orthogonal involution, so symmetry, definiteness and the
+# whole eigenvalue spectrum are untouched -- only which block is called ff.
+MOMENT_FIRST_VERSION = 3
+_SWAP = [3, 4, 5, 0, 1, 2]
+
+
+def swap_blocks(K):
+    """Pi K Pi for K [..., 6, 6] — force-first <-> moment-first."""
+    return K[..., _SWAP, :][..., :, _SWAP]
+
+
 SCALAR_KEYS = ('r_peg', 'H', 'T', 'clearance', 'depth', 'tilt',
                'yaw_mismatch', 'noise')
 
@@ -57,7 +72,10 @@ def _subsample_index(n_total, n_points, seed, global_idx):
 
 
 def _cache_dir(root, n_points, seed):
-    return os.path.join(root, 'cache', f'n{n_points}_seed{seed}')
+    # 규약 버전을 경로에 넣는다: force-first 시절 캐시를 조용히 재사용하면
+    # 라벨만 옛 basis 로 섞여 들어간다.
+    return os.path.join(root, 'cache',
+                        f'n{n_points}_seed{seed}_v{MOMENT_FIRST_VERSION}')
 
 
 def relabel_subsample(P, part, area_peg, area_plate, cfg, device='cpu'):
@@ -136,6 +154,11 @@ def load_peg_hole_split(root, split, n=None, n_points=None, seed=0,
         lambda_body = meta['cfg']['lambda_body']
     do_relabel = relabel and n_points is not None \
         and n_points < meta['n_points']
+    # 재라벨 경로는 현행 peg_hole_synth 를 다시 돌리므로 이미 새 basis 다.
+    old_basis = meta.get('version', 1) < MOMENT_FIRST_VERSION
+    if old_basis and not do_relabel:
+        print(f"[peg_hole] v{meta.get('version')} 데이터셋 — 저장 라벨을 "
+              f'moment-first 로 변환해서 읽는다 (Pi K Pi)', flush=True)
 
     P, K, info = [], [], {k: [] for k in
                           ('part', 'stage', 'profile', 'n_peg', 'area_peg',
@@ -156,6 +179,8 @@ def load_peg_hole_split(root, split, n=None, n_points=None, seed=0,
                 part = torch.from_numpy(z['part'][:take])
                 Kc = torch.from_numpy(z['K_contact'][:take])
                 Kb = torch.from_numpy(z['K_body'][:take])
+                if old_basis:
+                    Kc, Kb = swap_blocks(Kc), swap_blocks(Kb)
                 if n_points is not None:
                     sel = torch.stack([
                         _subsample_index(pts.shape[1], n_points, seed,
@@ -196,6 +221,7 @@ class PegHoleDataset(torch.utils.data.Dataset):
                             if lambda_body is None else lambda_body)
         self.relabel = (relabel and n_points is not None
                         and n_points < meta['n_points'])
+        self.old_basis = meta.get('version', 1) < MOMENT_FIRST_VERSION
         self.shards = meta['splits'][split]['shards']
         self.offsets = np.cumsum([0] + [s['n'] for s in self.shards])
         self._cache_idx, self._cache = None, None
@@ -218,6 +244,9 @@ class PegHoleDataset(torch.utils.data.Dataset):
                     self._cache = {k: torch.from_numpy(z[k]) for k in
                                    ('points', 'part', 'K_contact', 'K_body')}
                 self._cache['points'] = self._cache['points'].double()
+                if self.old_basis:
+                    for k in ('K_contact', 'K_body'):
+                        self._cache[k] = swap_blocks(self._cache[k])
             self._cache_idx = si
         return self._cache
 

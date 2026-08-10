@@ -1,4 +1,5 @@
-"""Shared diagnostics + wandb helper for the pc_se3_congruence experiments.
+"""[SHARED UTIL]
+Shared diagnostics + wandb helper for the pc_se3_congruence experiments.
 
 wandb policy: scalars/summaries only.  init_wandb() disables code saving and
 we never call wandb.save / wandb.watch / Artifact — model checkpoints and
@@ -8,6 +9,7 @@ import os
 
 import torch
 
+# 다른 계정으로 돌릴 때는 --wandb-entity / --wandb-project 로 덮는다.
 WANDB_ENTITY = 'adjoint_equivariant_network'
 WANDB_PROJECT = 'pc-se3-congruence'
 
@@ -15,14 +17,17 @@ WANDB_PROJECT = 'pc-se3-congruence'
 def block_metrics(K_pred, K_gt, eps=1e-30):
     """Per-block relative Frobenius errors + rank/eigenvalue stats.
 
-    ff/fm/mm 블록별 오차는 실패를 국소화하는 핵심 진단이다
-    (bracket_blockage_analysis.md — ff 오차만 높으면 blockage/인코더 소멸,
-    전 블록이 높으면 용량·표본 문제).
+    블록별 오차는 실패를 국소화하는 핵심 진단이다 (ff 오차만 높으면
+    blockage/인코더 소멸, 전 블록이 높으면 용량·표본 문제).
+
+    저장이 [m; f] 이므로 slot 0:3 = moment, slot 3:6 = force. 따라서
+    mm = 회전 강성, ff = 병진 강성, fm = 결합. (angular-first 로 바꾸기 전에는
+    이름이 반대였다 — 옛 로그의 err_rel_ff 는 지금의 err_rel_mm 이다.)
     """
     out = {}
-    blocks = {'ff': (slice(0, 3), slice(0, 3)),
-              'fm': (slice(0, 3), slice(3, 6)),
-              'mm': (slice(3, 6), slice(3, 6))}
+    blocks = {'mm': (slice(0, 3), slice(0, 3)),
+              'fm': (slice(0, 3), slice(3, 6)),      # 결합 블록 (K 는 대칭)
+              'ff': (slice(3, 6), slice(3, 6))}
     for name, (r, c) in blocks.items():
         num = (K_pred[:, r, c] - K_gt[:, r, c]).norm(dim=(1, 2))
         den = K_gt[:, r, c].norm(dim=(1, 2)) + eps
@@ -85,9 +90,9 @@ def group_metrics(K_pred, K_gt, d, group, names, eps=1e-30):
         if n == 0:
             continue
         out[f'{name}/val_d'] = d[m].mean().item()
-        for blk, (r, c) in {'ff': (slice(0, 3), slice(0, 3)),
+        for blk, (r, c) in {'mm': (slice(0, 3), slice(0, 3)),
                             'fm': (slice(0, 3), slice(3, 6)),
-                            'mm': (slice(3, 6), slice(3, 6))}.items():
+                            'ff': (slice(3, 6), slice(3, 6))}.items():
             num = (K_pred[m][:, r, c] - K_gt[m][:, r, c]).norm(dim=(1, 2))
             den = K_gt[m][:, r, c].norm(dim=(1, 2)) + eps
             out[f'{name}/err_rel_{blk}'] = (num / den).mean().item()
@@ -97,7 +102,8 @@ def group_metrics(K_pred, K_gt, d, group, names, eps=1e-30):
 def f_signal(model, P, direction_slots):
     """Encoder direction-channel norm — ff-계보의 유일한 입력 신호.
 
-    direction_slots: covector [f; m]이면 slice(0, 3), twist [v; w]면 slice(3, 6).
+    direction_slots: covector [m; f]이면 slice(3, 6), twist [w; v]면 slice(0, 3).
+    (저장이 angular/moment-first 이므로 방향 채널은 covector 쪽이 뒤 슬롯이다.)
     """
     with torch.no_grad():
         W = model.encoder(P)
@@ -122,5 +128,6 @@ def init_wandb(name, config, mode='online',
                           config=config, mode=mode, save_code=False,
                           reinit=True)
     except Exception as e:
-        print(f'[wandb 비활성화: {e}]')
+        # 학습은 계속되지만 지표는 남지 않는다 — entity/project 를 함께 찍는다.
+        print(f'[wandb 비활성화: {e} (entity={entity} project={project})]')
         return None

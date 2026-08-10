@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 import torch
 
-from data_loader.peg_hole_data_loader import (PegHoleDataset,
+from data_loader.peg_hole_data_loader import (PegHoleDataset, _cache_dir,
                                               load_peg_hole_split)
 from experiment.pc_se3_congruence.peg_hole_synth import (STAGES, body_K_areas,
                                                          compose_K,
@@ -246,7 +246,8 @@ def test_relabel_makes_the_subsampled_target_a_function_of_the_input(shard_dir):
 
 def test_relabel_cache_is_consistent(shard_dir):
     a = load_peg_hole_split(shard_dir, 'val', n_points=N // 2, seed=2)
-    assert os.path.isdir(os.path.join(shard_dir, 'cache', f'n{N // 2}_seed2'))
+    # 경로 형식을 여기서 다시 쓰지 않는다 — 규약 버전이 들어가 있어서 어긋난다.
+    assert os.path.isdir(_cache_dir(shard_dir, N // 2, 2))
     b = load_peg_hole_split(shard_dir, 'val', n_points=N // 2, seed=2)
     c = load_peg_hole_split(shard_dir, 'val', n_points=N // 2, seed=2,
                             cache=False)

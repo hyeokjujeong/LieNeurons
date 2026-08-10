@@ -1,7 +1,27 @@
-"""Point cloud -> se(3) feature encoders.
+"""[COMPARISON ARMS] Global-pooling point cloud -> se(3) feature encoders.
+
+The current encoder is
+:class:`~experiment.pc_se3_congruence.pointwise_models.LocalWrenchSetEncoder`,
+which removes the neighbour axis k by learned SET aggregation and keeps the
+point axis N.  Everything in this module does the opposite -- it averages the
+point axis into global vector channels and uses neighbour RANK as the channel
+index -- and is kept only because ``blockage_bench.py`` selects between these
+six encoders via ``--encoder`` to reproduce the reported baselines.
+
+Rank channels are not invariant under a relabelling of an equal-distance shell,
+so these encoders break equivariance on exact distance ties (cubic lattice,
+tetrahedral orbits).  That is a property of the construction, not a bug to fix
+here; see ``pointwise_models.py`` for the replacement.
+
+EXCEPTION -- two module-level helpers below are CURRENT and depended on by the
+label generators, not by the superseded encoders: ``knn_indices`` and
+``compact_wendland_weights`` are imported by ``data_synth.py`` and
+``peg_hole_synth.py`` to build the analytic contact-spring targets.  They are
+plain geometry, unaffected by the pooling argument above.
 
 Two constructions of the same underlying map (the origin-referenced Pluecker /
-screw lifting  L0(r, n) = (r x n, n)  in [v; omega] storage order):
+screw lifting  L0(r, n) = (n, r x n)  in ANGULAR-FIRST [omega; v] storage order;
+wrench encoders store [m; f] to match):
 
   (1) PlueckerEncoder  — closed form, no parameters: directions are pairwise
       differences d_ij = r_j - r_i, moment r_i x d_ij = r_i x r_j.
@@ -66,7 +86,7 @@ class PlueckerEncoder(nn.Module):
                            idx.unsqueeze(-1).expand(B, N, self.k, 3))
         d = nbr - P.unsqueeze(2)                             # [B, N, k, 3]
         m = torch.cross(P.unsqueeze(2).expand_as(d), d, dim=-1)  # r_i x d_ij
-        xi = torch.cat([m, d], dim=-1)                       # [B, N, k, 6], [v; omega]
+        xi = torch.cat([d, m], dim=-1)                       # [B, N, k, 6], [omega; v]
         V = xi.mean(dim=1)                                   # [B, k, 6]
         return V.unsqueeze(-1)                               # [B, k, 6, 1]
 
@@ -157,15 +177,16 @@ class LearnableLiftEncoder(nn.Module):
         else:
             ref = r - c.transpose(1, 2).unsqueeze(1)          # r - c
         m = torch.cross(ref.expand_as(n), n, dim=2)           # [B, C, 3, N]
-        xi = torch.cat([m, n], dim=2)                         # [B, C, 6, N]
+        xi = torch.cat([n, m], dim=2)                         # [B, C, 6, N]
         V = xi.mean(dim=-1)                                   # [B, C, 6]
 
         if self.mode == 'anchor_transport':
-            # Ad_{(I,c)} in [v; omega] order: v <- v + c x omega
+            # Ad_{(I,c)} in [omega; v] order: v <- v + c x omega
             ch = hat3(c.squeeze(1))                           # [B, 3, 3]
-            V = torch.cat([V[:, :, 0:3] +
-                           torch.einsum('bij,bcj->bci', ch, V[:, :, 3:6]),
-                           V[:, :, 3:6]], dim=-1)
+            V = torch.cat([V[:, :, 0:3],
+                           V[:, :, 3:6] +
+                           torch.einsum('bij,bcj->bci', ch, V[:, :, 0:3])],
+                          dim=-1)
         return V.unsqueeze(-1)                                # [B, C, 6, 1]
 
 
@@ -173,15 +194,15 @@ class LearnableLiftEncoder(nn.Module):
 # A pure force with direction n acting along the line through r has the
 # origin-referenced wrench
 #
-#     W(r, n) = (m, f) = (r x n, n),        stored [f; m] as in models.py.
+#     W(r, n) = (m, f) = (r x n, n),        stored [m; f] as in models.py.
 #
 # Under T = (R, p):  f' = R n = R f  and
 #     m' = (Rr + p) x Rn = R(r x n) + p x Rn = R m + p x R f,
 # i.e.  W(T.(r, n)) = Ad_T^{-T} W(r, n)  — the coadjoint law, obtained with no
 # Q constructed anywhere.  Same numbers as the twist Pluecker lift, opposite
 # slot order and opposite transformation type: the Pluecker coordinates of a
-# line are a zero-pitch twist when read [v; omega] and a pure-force wrench
-# when read [f; m].
+# line are a zero-pitch twist when read [omega; v] and a pure-force wrench
+# when read [m; f].
 
 class WrenchPlueckerEncoder(nn.Module):
     """Closed-form pairwise pure-force lifting: channel c = rank-c nearest
@@ -192,14 +213,14 @@ class WrenchPlueckerEncoder(nn.Module):
         self.k = k
 
     def forward(self, P):
-        """P: [B, N, 3] -> W: [B, k, 6, 1] stored [f; m]"""
+        """P: [B, N, 3] -> W: [B, k, 6, 1] stored [m; f]"""
         B, N, _ = P.shape
         idx = knn_indices(P, self.k)                          # [B, N, k]
         nbr = torch.gather(P.unsqueeze(2).expand(B, N, self.k, 3), 1,
                            idx.unsqueeze(-1).expand(B, N, self.k, 3))
         f = nbr - P.unsqueeze(2)                              # [B, N, k, 3]
         m = torch.cross(P.unsqueeze(2).expand_as(f), f, dim=-1)  # r_i x d_ij
-        W = torch.cat([f, m], dim=-1).mean(dim=1)             # [B, k, 6]
+        W = torch.cat([m, f], dim=-1).mean(dim=1)             # [B, k, 6]
         return W.unsqueeze(-1)                                # [B, k, 6, 1]
 
 
@@ -229,7 +250,7 @@ class WrenchLearnableLiftEncoder(nn.Module):
         self.act_out = VNLeakyReLU(out_channels)
 
     def forward(self, P):
-        """P: [B, N, 3] -> W: [B, C, 6, 1] stored [f; m]"""
+        """P: [B, N, 3] -> W: [B, C, 6, 1] stored [m; f]"""
         B, N, _ = P.shape
         c = P.mean(dim=1, keepdim=True)                       # [B, 1, 3]
         x = (P - c).transpose(1, 2).unsqueeze(1)              # [B, 1, 3, N]
@@ -244,15 +265,14 @@ class WrenchLearnableLiftEncoder(nn.Module):
         else:
             ref = r - c.transpose(1, 2).unsqueeze(1)          # r - c
         m = torch.cross(ref.expand_as(n), n, dim=2)           # [B, C, 3, N]
-        W = torch.cat([n, m], dim=2).mean(dim=-1)             # [B, C, 6], [f; m]
+        W = torch.cat([m, n], dim=2).mean(dim=-1)             # [B, C, 6], [m; f]
 
         if self.mode == 'anchor_transport':
-            # Ad_{(I,c)}^{-T} in [f; m] order: m <- m + c x f
+            # Ad_{(I,c)}^{-T} in [m; f] order: m <- m + c x f
             ch = hat3(c.squeeze(1))                           # [B, 3, 3]
-            W = torch.cat([W[:, :, 0:3],
-                           W[:, :, 3:6] +
-                           torch.einsum('bij,bcj->bci', ch, W[:, :, 0:3])],
-                          dim=-1)
+            W = torch.cat([W[:, :, 0:3] +
+                           torch.einsum('bij,bcj->bci', ch, W[:, :, 3:6]),
+                           W[:, :, 3:6]], dim=-1)
         return W.unsqueeze(-1)                                # [B, C, 6, 1]
 
 
@@ -273,7 +293,7 @@ class WrenchEdgeEncoder(nn.Module):
     - ``graph='all'``: ``C=1`` and ``M=N(N-1)`` directed edges.  There is no
       neighbor ranking or boundary, so exact distance ties are harmless.
 
-    Wrenches are stored as ``[f; m]`` with ``f=r_j-r_i`` and
+    Wrenches are stored as ``[m; f]`` with ``f=r_j-r_i`` and
     ``m=r_i x f`` and therefore transform by ``Ad_T^{-T}``.
     """
 
@@ -298,7 +318,7 @@ class WrenchEdgeEncoder(nn.Module):
                 idx.unsqueeze(-1).expand(B, N, edge_k, 3))
             f = nbr - P.unsqueeze(2)                          # [B, N, K, 3]
             m = torch.cross(P.unsqueeze(2).expand_as(f), f, dim=-1)
-            return torch.cat([f, m], dim=-1).permute(0, 2, 3, 1)
+            return torch.cat([m, f], dim=-1).permute(0, 2, 3, 1)
 
         # All ordered pairs i != j.  The edge order may change under a point
         # permutation, but the second-moment sum in the head is order-free.
@@ -308,7 +328,7 @@ class WrenchEdgeEncoder(nn.Module):
         r = P.unsqueeze(2).expand(B, N, N, 3)
         r = r[:, mask].reshape(B, N * (N - 1), 3)
         m = torch.cross(r, f, dim=-1)
-        return torch.cat([f, m], dim=-1).transpose(1, 2).unsqueeze(1)
+        return torch.cat([m, f], dim=-1).transpose(1, 2).unsqueeze(1)
 
 class BracketPlueckerEncoder(nn.Module):
     """Wrench Pluecker lift + PRE-POOLING covector-bracket channels (design A).
@@ -335,14 +355,14 @@ class BracketPlueckerEncoder(nn.Module):
         self.out_channels = 2 * k - 1
 
     def forward(self, P):
-        """P: [B, N, 3] -> W: [B, 2k-1, 6, 1] stored [f; m]"""
+        """P: [B, N, 3] -> W: [B, 2k-1, 6, 1] stored [m; f]"""
         B, N, _ = P.shape
         idx = knn_indices(P, self.k)
         nbr = torch.gather(P.unsqueeze(2).expand(B, N, self.k, 3), 1,
                            idx.unsqueeze(-1).expand(B, N, self.k, 3))
         f = nbr - P.unsqueeze(2)                              # [B, N, k, 3]
         m = torch.cross(P.unsqueeze(2).expand_as(f), f, dim=-1)
-        w = torch.cat([f, m], dim=-1)                         # [B, N, k, 6]
+        w = torch.cat([m, f], dim=-1)                         # [B, N, k, 6]
 
         # per-point covector bracket of consecutive rank pairs (a, a+1)
         fa, ma = f[:, :, :-1], m[:, :, :-1]
@@ -350,7 +370,7 @@ class BracketPlueckerEncoder(nn.Module):
         br_f = torch.cross(fa, fb, dim=-1)                    # 짝수 (even)
         br_m = (torch.cross(fa, mb, dim=-1)
                 - torch.cross(fb, ma, dim=-1))                # 홀수 (odd)
-        wbr = torch.cat([br_f, br_m], dim=-1)                 # [B, N, k-1, 6]
+        wbr = torch.cat([br_m, br_f], dim=-1)                 # [B, N, k-1, 6]
 
         W = torch.cat([w, wbr], dim=2).mean(dim=1)            # [B, 2k-1, 6]
         return W.unsqueeze(-1)

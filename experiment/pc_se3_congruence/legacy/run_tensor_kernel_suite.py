@@ -1,4 +1,5 @@
-"""Run the local-kernel + second-moment experiment on the full object suite.
+"""[SUPERSEDED gen-2 -> run_pointwise_suite.py]
+Run the local-kernel + second-moment experiment on the full object suite.
 
 The suite contains centro (four asymmetry levels), C2, tetrahedral, and IID
 clouds (three point counts).  ``--phase both`` first verifies that the analytic
@@ -7,11 +8,11 @@ kernel.  Each case is recorded as a separate W&B run by blockage_bench.py.
 
 Examples:
   # Fast smoke test, no W&B
-  python experiment/pc_se3_congruence/run_tensor_kernel_suite.py \
+  python experiment/pc_se3_congruence/legacy/run_tensor_kernel_suite.py \
       --quick --phase both --wandb-mode disabled
 
   # Recommended learned experiment
-  python experiment/pc_se3_congruence/run_tensor_kernel_suite.py \
+  python experiment/pc_se3_congruence/legacy/run_tensor_kernel_suite.py \
       --recipe full --phase train --wandb-mode online
 """
 import argparse
@@ -21,7 +22,9 @@ from pathlib import Path
 
 
 def command(args, weight):
-    bench = Path(__file__).with_name('blockage_bench.py')
+    # blockage_bench.py stayed in the parent package when this driver moved to
+    # legacy/ (it is still the current training entry point).
+    bench = Path(__file__).resolve().parent.parent / 'blockage_bench.py'
     cmd = [
         sys.executable, str(bench),
         '--suite',

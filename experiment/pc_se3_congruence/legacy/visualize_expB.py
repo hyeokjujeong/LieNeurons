@@ -1,4 +1,5 @@
-"""Presentation GIF for experiment B: congruence-equivariant K under SE(3).
+"""[SUPERSEDED gen-1]
+Presentation GIF for experiment B: congruence-equivariant K under SE(3).
 
 A peg-shaped point cloud is moved along a three-phase SE(3) trajectory
 (pure rotation -> pure translation -> screw motion back to the identity).
@@ -38,7 +39,7 @@ Two frame variants are rendered from the same pipeline (see FRAME_TEXT):
              drifts by O(1) once p != 0 -- is what makes the panel evidence.
 
 Run from the repo root:
-    python experiment/pc_se3_congruence/visualize_expB.py
+    python experiment/pc_se3_congruence/legacy/visualize_expB.py
 Writes figs/expB_congruence{,_body}.gif plus four key-frame PNGs each.
 """
 import os

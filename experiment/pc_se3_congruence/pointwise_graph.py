@@ -1,4 +1,5 @@
-"""Tie-safe local graph for the pointwise wrench -> stiffness pipeline.
+"""[CURRENT MODEL]
+Tie-safe local graph for the pointwise wrench -> stiffness pipeline.
 
 NOTATION (fixed once for the whole pointwise pipeline; the stiffness matrix is
 the only object called K).
@@ -12,7 +13,7 @@ the only object called K).
     K   the 6x6 stiffness matrix
 
     P          [B, N, 3]
-    edge wrench[B, N, k, 6]      stored [f; m]
+    edge wrench[B, N, k, 6]      stored [m; f]
     X          [B, C, 6, N]      repo Lie-Neuron layout (point axis trailing)
     Z          [B, H, 6, N]
     K          [B, 6, 6]

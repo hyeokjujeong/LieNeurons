@@ -1,4 +1,5 @@
-"""Pointwise wrench pipeline: keep the POINT axis until the Gram.
+"""[CURRENT MODEL]
+Pointwise wrench pipeline: keep the POINT axis until the Gram.
 
     P --local Pluecker lift--> w_ij           [B, N, k, 6]
       --learned invariant set pooling-------> X^(0)  [B, C_0, 6, N]
@@ -74,9 +75,9 @@ def gather_neighbors(x, idx):
 
 
 def klein_pair(a, b):
-    """Klein pairing of two covector features stored [f; m] along dim 2.
+    """Klein pairing of two covector features stored [m; f] along dim 2.
 
-    <a, b> = f_a . m_b + m_a . f_b.  Invariant under the coadjoint action: the
+    <a, b> = m_a . f_b + f_a . m_b.  Invariant under the coadjoint action: the
     two cross terms  Rf_a . (p x Rf_b)  and  (p x Rf_a) . Rf_b  are opposite
     determinants and cancel.  Contracts dim 2, so it works for both [B,C,6,N]
     and the gathered [B,C,6,N,k].
@@ -88,9 +89,9 @@ def klein_pair(a, b):
 def force_pair(a, b):
     """f_a . f_b -- also invariant, because the force slot is translation blind
     (f -> R f).  It is the pairing induced by the equivariant projection
-    N_*: (f, m) -> (f, 0), the second element of the 2-dimensional space of
-    equivariant bilinear maps on se(3)*."""
-    return (a[:, :, 0:3] * b[:, :, 0:3]).sum(2)
+    N_*: (m, f) -> (0, f), the second element of the 2-dimensional space of
+    equivariant bilinear maps on se(3)*.  Storage is [m; f], so f is slot 3:6."""
+    return (a[:, :, 3:6] * b[:, :, 3:6]).sum(2)
 
 
 def bounded_invariant(s):
@@ -225,14 +226,14 @@ class LocalWrenchSetEncoder(nn.Module):
 
     # ---------------------------------------------------------------- pieces
     def edge_wrenches(self, P, graph):
-        """P: [B, N, 3] -> w: [B, N, k, 6] stored [f; m].
+        """P: [B, N, 3] -> w: [B, N, k, 6] stored [m; f].
 
         f = d_ij = p_j - p_i,  m = p_i x d_ij.  Under T = (R, p):
         f -> R f and m -> R m + p x R f, i.e. w -> Ad_T^{-T} w with no Q built.
         """
         d = graph.edge_vec
         m = torch.cross(P.unsqueeze(2).expand_as(d), d, dim=-1)
-        return torch.cat([d, m], dim=-1)
+        return torch.cat([m, d], dim=-1)
 
     def pooling_weights(self, graph):
         """:class:`LocalGraph` -> a: [B, N, k, C] invariant pooling weights."""
@@ -275,7 +276,7 @@ class LocalWrenchSetEncoder(nn.Module):
         contracted through the Levi-Civita symbol, so the largest intermediate
         is [B, N, k, C_b, 3] instead of [B, N, k, k, 6].
         """
-        f, m = w[..., 0:3], w[..., 3:6]
+        m, f = w[..., 0:3], w[..., 3:6]
         q = graph.q
         n = f / f.norm(dim=-1, keepdim=True).clamp_min(_EPS)
         cos = torch.einsum('bnjx,bnlx->bnjl', n, n)
@@ -297,7 +298,8 @@ class LocalWrenchSetEncoder(nn.Module):
         out_f = contract(f, f)                                   # f_j x f_l
         # sum coef (f_j x m_l - f_l x m_j); the second term equals -eps(T_mf).
         out_m = contract(f, m) + contract(m, f)
-        return torch.cat([out_f, out_m], dim=2)                  # [B, C_b, 6, N]
+        # 저장은 [m; f] 이므로 moment 슬롯이 먼저다.
+        return torch.cat([out_m, out_f], dim=2)                  # [B, C_b, 6, N]
 
     # --------------------------------------------------------------- forward
     def forward(self, P, graph):
@@ -421,7 +423,7 @@ class KleinGate(nn.Module):
             return s.unsqueeze(1)                                # [B, 1, N, in]
         s = [bounded_invariant(klein_gram(x))]                   # [B, C, C, N]
         if self.use_force:
-            f = x[:, :, 0:3]
+            f = x[:, :, 3:6]                              # [m; f] 저장
             s.append(bounded_invariant(
                 torch.einsum('bcin,bdin->bcdn', f, f)))
         return torch.cat(s, dim=2).permute(0, 1, 3, 2)           # [B, C, N, in]

@@ -1,4 +1,5 @@
-"""Affine-invariant (AIRM) geodesic loss on SPD matrices, gradient-safe.
+"""[SHARED UTIL]
+Affine-invariant (AIRM) geodesic loss on SPD matrices, gradient-safe.
 
 The minimal geodesic distance on S^{++}_n with the affine-invariant metric
 g_A(X, Y) = tr(A^{-1} X A^{-1} Y) is
@@ -29,8 +30,36 @@ Closed-form gradient (for reference / sanity checks):
 which diverges like 2 log(lam)/lam as an eigenvalue lam -> 0.  The AIRM
 distance is a natural barrier of the SPD cone; use `eig_floor` to cap the
 gradient magnitude early in training if predictions start near-singular.
+
+WHICH FUNCTION TO USE.  ``affine_invariant_d`` is THE loss every current
+training run optimises (``blockage_bench.py``, ``peghole_baseline.py``); it
+whitens with the Cholesky factor of the target and reports how many eigenvalues
+hit the guard.  It used to live in the now-superseded ``legacy/train.py``, which
+made the current entry points depend on legacy code; it lives here instead.
+The ``airm_dist`` / ``airm_dist2`` pair below is the same distance written with
+an explicit inverse square root -- more general (it accepts a precomputed
+A^{-1/2}) but slower, and kept as the reference implementation.
+``log_euclidean_dist2`` is a comparison metric only: it is NOT SE(3)-invariant.
 """
 import torch
+
+EIG_CLAMP = 1e-12
+
+
+def affine_invariant_d(chol_gt, K_pred):
+    """d = ||log(K_gt^{-1/2} K_pred K_gt^{-1/2})||_F per sample.
+
+    chol_gt: [B, 6, 6] lower Cholesky of K_gt (no grad), K_pred: [B, 6, 6].
+    Returns (d [B], n_clamped) — n_clamped counts eigenvalues at the guard
+    (invariant quantity, so clamping does not break loss invariance).
+    """
+    X = torch.linalg.solve_triangular(chol_gt, K_pred, upper=False)
+    A = torch.linalg.solve_triangular(chol_gt, X.transpose(-1, -2), upper=False)
+    A = 0.5 * (A + A.transpose(-1, -2))
+    lam = torch.linalg.eigvalsh(A)
+    n_clamped = int((lam <= EIG_CLAMP).sum().item())
+    d2 = torch.log(lam.clamp_min(EIG_CLAMP)).square().sum(-1)
+    return torch.sqrt(d2), n_clamped
 
 
 def sqrtm_spd(A):

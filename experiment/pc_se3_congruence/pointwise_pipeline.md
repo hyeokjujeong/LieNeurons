@@ -4,7 +4,7 @@
 **W&B project:** `adjoint_equivariant_network/pc-se3-congruence`  
 **정밀도/장치:** `torch.float64`, CPU 및 CUDA  
 **상태:** 구조 검증 + **full GPU 학습 완료**. §8.3–§8.5(Phase 1–3)를
-`run_pointwise_gpu_experiments.sh`로 실행했고, §5.5가 그 결과다 (18 run, 약 72분).
+`run_experiments.sh`(당시 `run_pointwise_gpu_experiments.sh`)로 실행했고, §5.5가 그 결과다 (18 run, 약 72분).
 남은 것은 정확도 ablation(§8.6)과 seed 분산(§7.2)이다.  
 **목적:** neighbor 축을 backbone 이전에 집합 축약으로 없애고 point 축을 second moment
 직전까지 유지하면, 대칭 물체의 rank collapse와 등거리 tie의 permutation 불변성 붕괴가
@@ -211,10 +211,11 @@ $$
 $$
 w_{ij}(T\cdot P)=A_T\,w_{ij}(P),
 \qquad
-A_T=\operatorname{Ad}_T^{-\top}=\begin{bmatrix}R&0\\ \hat pR&R\end{bmatrix}.
+A_T=\operatorname{Ad}_T^{-\top}=\begin{bmatrix}R&\hat pR\\ 0&R\end{bmatrix}.
 $$
 
-저장 순서는 $[f;m]$이며 **force slot이 translation에 blind**하다. 물리적으로 $w_{ij}$는
+저장 순서는 $[m;f]$(moment-first)이며 $A_T$가 **블록 상삼각**이라 **force slot이
+translation에 blind**하다. 물리적으로 $w_{ij}$는
 $p_i$를 지나 $p_j$를 향하는 직선을 따르는 순수 힘의 wrench이며, Klein 행렬 $Q$는
 코드 어디에도 등장하지 않는다.
 
@@ -692,7 +693,7 @@ iid에서 equivariance, $C_2$에서 permutation·rank, 격자에서 tie 불변�
 
 ### 5.5 Full GPU 학습 결과 (Phase 2–3)
 
-`bash experiment/pc_se3_congruence/run_pointwise_gpu_experiments.sh`, §4.4의 full recipe,
+`bash experiment/pc_se3_congruence/run_experiments.sh verify synth-teacher synth-analytic`, §4.4의 full recipe,
 CUDA, float64, 18,697 파라미터. 표준 object suite 9 케이스 × 2 타깃 = 18 run,
 합계 약 72분 (케이스당 89–153초, $N=512$만 약 17분).
 
@@ -838,7 +839,7 @@ degree 9.6/13.5/15.3, truncation 0.000을 준다. 이것이 기본값을 밀도 
 > 전 분포(부피 $N$=32–1024, 표면, 곡선, 래티스, centro/c2/tetra)에서 degree 15.4–16.0,
 > truncation 0.000이다. 상세는 `graph_radius.md`.
 >
-> **본 보고서의 수치는 유효하다.** §5.5의 18 run은 `run_pointwise_gpu_experiments.sh`가
+> **본 보고서의 수치는 유효하다.** §5.5의 18 run은 이 스크립트가
 > `density_scaled` $\alpha$=1.15·`candidate_k=64`를 플래그로 고정하며, 그 설정에서 신·구
 > 코드의 graph 텐서가 비트 단위로 동일함을 확인했다.
 
@@ -949,10 +950,11 @@ full rank가 나온다는 것이 아니다.
 
 ```bash
 conda activate lieneurons
-bash experiment/pc_se3_congruence/run_pointwise_gpu_experiments.sh
+bash experiment/pc_se3_congruence/run_experiments.sh \
+    verify synth-teacher synth-analytic
 ```
 
-`DEVICE`, `WANDB_MODE`, `VERIFY_OUT` 환경변수로 장치·로깅·출력 경로를 바꿀 수 있다.
+`DEV`, `WANDB_MODE`, `VERIFY_OUT` 환경변수로 장치·로깅·출력 경로를 바꿀 수 있다.
 
 ### 8.1 사전 점검
 

@@ -1,8 +1,36 @@
-"""Models for experiments A, B, C.
+"""[COMPARISON ARMS] Global-pooling models -- experiments A, B, C.
+
+None of these is the current architecture.  The current one is
+:class:`~experiment.pc_se3_congruence.pointwise_models.PointwiseStiffnessModel`.
+This module survives because ``blockage_bench.py`` still instantiates five of
+these classes as the arms every current result is measured against, so it is
+live code -- but nothing new should be built on it.
+
+WHY THEY WERE SUPERSEDED.  Every model here pools the POINT axis N into global
+vector channels before the head.  A symmetry of the cloud then has to FIX each
+channel rather than permute them, so all channels are forced into Fix_H(rho) and
+rank(K) collapses from 6 to 3 on centro-symmetric and C2 clouds.  Keeping the
+point axis until the Gram (``pointwise_models.py``) removes the constraint,
+because L(T.P) = A_T L(P) (Pi_T (x) I_H) and the permutation gauge cancels in
+L L^T.  ``WrenchSecondMomentModel`` additionally indexes channels by NEIGHBOUR
+RANK, which is not invariant under relabelling an equal-distance shell; it is
+retained precisely as the arm that FAILS the exact-tie test (permutation error
+1.9e-01 vs 3.0e-16), which is what test_pc_pointwise_pipeline.py asserts.
+
+Section map (single ``# ====`` banners below mark the boundaries):
+  1. twist-path models A/B                      -- Backbone .. ModelC
+  2. covector-native path                       -- twist_bracket .. ModelPC2K
+  3. rank-channel second moment (generation 2)  -- WrenchSecondMomentModel
+  4. Klein-gate backbones                       -- klein_gram .. DualBackbone
+  5. negative controls                          -- NaiveHeadNoKlein, add_bias_*
+
+Imported by ``blockage_bench.py``: DualBackbone, GateBackbone, ModelB,
+ModelPC2K, WrenchSecondMomentModel.  Everything else is reached only from
+``legacy/``.
 
 Backbone: Lie Neurons LNLinear + LNLieBracket only (algebra_type='se3').
-Feature layout follows the repo: x in [B, F, 6, N] with x[..., 0:3, :] = v,
-x[..., 3:6, :] = omega.
+Feature layout follows the repo (ANGULAR / MOMENT FIRST): x in [B, F, 6, N]
+with x[..., 0:3, :] = omega (twists) or m (wrenches), x[..., 3:6, :] = v or f.
 
 Heads:
   A (compliance-type):  C = Z Z^T / C_out          ->  Ad_T C Ad_T^T
@@ -20,6 +48,7 @@ from core.lie_neurons_layers import LNLinear, LNLinearAndLieBracket
 from experiment.pc_se3_congruence.se3_utils import klein_Q, klein_Q_inv
 
 
+# ================================================ 1. twist-path models A and B
 class Backbone(nn.Module):
     """Stack of LNLinear + LNLieBracket blocks (the only two layer types)."""
 
@@ -101,26 +130,31 @@ class ModelC(nn.Module):
 
 
 # ------------------------------------------- covector-space (wrench) algebra
-# Storage: for TWISTS the repo order is [v; omega], so slot0 = v, slot1 = omega.
-# A wrench F pairs with a twist by F^T xi = F_0 . v + F_1 . omega, so to make
-# that equal the physical power m . omega + f . v we must store F as [f; m]:
-# slot0 = f (force), slot1 = m (moment).  Under the coadjoint action
+# Storage: for TWISTS the repo order is [omega; v], so slot0 = omega, slot1 = v.
+# A wrench F pairs with a twist by F^T xi = F_0 . omega + F_1 . v, so to make
+# that equal the physical power m . omega + f . v we must store F as [m; f]:
+# slot0 = m (moment), slot1 = f (force).  Under the coadjoint action
 #     (m, f) -> (R m + p x R f,  R f),
 # so for wrenches it is the FORCE slot that is translation-blind -- exactly the
 # role omega plays for twists.  The two representations are swapped copies of
 # each other, which is what Q implements.
 
+# ================================================= 2. covector-native path
 def twist_bracket(X1, X2):
-    """[X1, X2] on se(3), features [B, F, 6, N] stored [v; omega]."""
-    v1, w1 = X1[:, :, 0:3], X1[:, :, 3:6]
-    v2, w2 = X2[:, :, 0:3], X2[:, :, 3:6]
-    return torch.cat([torch.cross(w1, v2, dim=2) - torch.cross(w2, v1, dim=2),
-                      torch.cross(w1, w2, dim=2)], dim=2)
+    """[X1, X2] on se(3), features [B, F, 6, N] stored [omega; v]:
+
+        [xi1, xi2] = ( w1 x w2 ,  w1 x v2 - w2 x v1 )
+    """
+    w1, v1 = X1[:, :, 0:3], X1[:, :, 3:6]
+    w2, v2 = X2[:, :, 0:3], X2[:, :, 3:6]
+    return torch.cat([torch.cross(w1, w2, dim=2),
+                      torch.cross(w1, v2, dim=2) - torch.cross(w2, v1, dim=2)],
+                     dim=2)
 
 
 def covector_bracket(F1, F2):
     """The unique (up to scale) equivariant bilinear map se(3)* x se(3)* ->
-    se(3)*, features [B, F, 6, N] stored [f; m]:
+    se(3)*, features [B, F, 6, N] stored [m; f]:
 
         [F1, F2]_* = ( f1 x m2 - f2 x m1 ,  f1 x f2 )   as (m, f)
 
@@ -130,11 +164,10 @@ def covector_bracket(F1, F2):
     Lie algebra without an invariant non-degenerate form admits no such
     operation on its dual at all.
     """
-    f1, m1 = F1[:, :, 0:3], F1[:, :, 3:6]
-    f2, m2 = F2[:, :, 0:3], F2[:, :, 3:6]
-    return torch.cat([torch.cross(f1, f2, dim=2),
-                      torch.cross(f1, m2, dim=2) - torch.cross(f2, m1, dim=2)],
-                     dim=2)
+    m1, f1 = F1[:, :, 0:3], F1[:, :, 3:6]
+    m2, f2 = F2[:, :, 0:3], F2[:, :, 3:6]
+    return torch.cat([torch.cross(f1, m2, dim=2) - torch.cross(f2, m1, dim=2),
+                      torch.cross(f1, f2, dim=2)], dim=2)
 
 
 class LNCovectorBracket(nn.Module):
@@ -242,10 +275,14 @@ class ModelPC2K(nn.Module):
         return self.head(self.backbone(self.encoder(P)))
 
 
+# ============================ 3. rank-channel second moment  [GENERATION 2]
+# Retained as the arm that FAILS the exact-tie test: it reads neighbour RANK as
+# a channel index, which is not invariant under relabelling an equal-distance
+# shell.  test_pc_pointwise_pipeline.py asserts that failure.
 class WrenchSecondMomentModel(nn.Module):
     """Late second-order pooling of point/edge wrench features.
 
-    For edge wrenches ``W=[f;m]`` transforming by ``A=Ad_T^{-T}``, form
+    For edge wrenches ``W=[m;f]`` transforming by ``A=Ad_T^{-T}``, form
 
         K = (1 / E) sum_e alpha(||f_e||^2) W_e W_e^T.
 
@@ -308,7 +345,7 @@ class WrenchSecondMomentModel(nn.Module):
 
     def forward(self, P):
         W = self.encoder(P)                                  # [B, C, 6, M]
-        sqdist = W[:, :, 0:3].square().sum(dim=2)             # [B, C, M]
+        sqdist = W[:, :, 3:6].square().sum(dim=2)             # [B, C, M]  (f 슬롯)
         radial_alpha = self.edge_weights(sqdist)
         compact_alpha = None
         if getattr(self.encoder, 'graph', None) == 'kernel':
@@ -356,26 +393,12 @@ class WrenchSecondMomentModel(nn.Module):
         return 0.5 * (K + K.transpose(-1, -2))
 
 
-class ModelPC2KNaiveBracket(nn.Module):
-    """NEGATIVE CONTROL: same wrench encoder, but the TWIST backbone (ordinary
-    se(3) Lie bracket) run on the wrench features.  Equivariant for Ad, not
-    Ad^{-T}: passes at p = 0, fails at O(1) once translation enters."""
-
-    def __init__(self, encoder, channels=(8, 16, 16, 8)):
-        super().__init__()
-        self.encoder = encoder
-        self.backbone = Backbone(channels)
-        self.head = CovectorGramHeadLK()
-
-    def forward(self, P):
-        return self.head(self.backbone(self.encoder(P)))
-
-
+# ====================================================== 4. Klein-gate backbones
 # ----------------------------------------- invariant Gram gating (PDF §6.2)
 def klein_gram(x):
     """Pairwise Klein pairings S_cd = x_c^T Q^{-1} x_d over channels.
 
-    Storage-agnostic: for x stored [a; b] (covector [f; m] or twist [v; w]),
+    Storage-agnostic: for x stored [a; b] (covector [m; f] or twist [w; v]),
     x_c^T Q x_d = a_c . b_d + b_c . a_d, which is the correct invariant of the
     respective representation in both orders (Q is the block swap, Q^{-1}=Q).
     x: [B, C, 6, N] -> S: [B, C, C, N], invariant under the group action.
@@ -467,7 +490,7 @@ class DualBackbone(nn.Module):
         return self.merge(torch.cat([xb, xg], dim=1))
 
 
-# --------------------------------------------------------- negative controls
+# ==================================================== 5. negative controls
 class NaiveHeadNoKlein(nn.Module):
     """K = Z Z^T without the Klein intertwiner: has the WRONG type — it
     transforms as Ad_T (.) Ad_T^T, not Ad_T^{-T} (.) Ad_T^{-1}."""

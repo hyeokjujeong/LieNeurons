@@ -1,4 +1,5 @@
-"""Phase 0 for the peg-and-hole experiment: the two numbers every trained
+"""[CURRENT ENTRY POINT]
+Phase 0 for the peg-and-hole experiment: the two numbers every trained
 AIRM distance has to be read against.
 
 Neither is a model.  Reporting ``val_d`` on its own says nothing — the AIRM
@@ -25,12 +26,15 @@ Read distances through ``exp(d / sqrt(6))``: the per-direction factor by which
 the prediction is off, since d is a Frobenius norm over 6 log-eigenvalues.
 
   python experiment/pc_se3_congruence/peghole_baseline.py \
-      --peghole-root data/peg_hole/v2 --n-points 1024 \
+      --data-path data/peg_hole/v2 --n-points 1024 \
       --n-train 20480 --n-val 2048 --device cuda:0
+  python experiment/pc_se3_congruence/peghole_baseline.py \
+      --data-path mydata.npz --n-train 0 --n-val 0
 """
 import argparse
 import json
 import math
+import os
 import sys
 
 sys.path.append('.')
@@ -39,9 +43,11 @@ import torch
 
 torch.set_default_dtype(torch.float64)
 
+from data_loader.pc_stiffness_data_loader import is_peg_hole, load_split
 from data_loader.peg_hole_data_loader import load_peg_hole_split, read_meta
 from experiment.pc_se3_congruence.peg_hole_synth import STAGES
-from experiment.pc_se3_congruence.train import EIG_CLAMP, affine_invariant_d
+from experiment.pc_se3_congruence.spd_loss import (EIG_CLAMP,
+                                                     affine_invariant_d)
 
 
 # ------------------------------------------------------------ SPD utilities
@@ -136,17 +142,26 @@ def _fmt(tag, s):
 
 
 # ------------------------------------------------------------------- phases
+def load_labels(args, dev):
+    """-> (K_train, K_val, stage or None).
+
+    ``load_split`` picks the format from the path.  A dataset without stage
+    annotation gives stage=None, and ``summarize`` then reports overall only.
+    """
+    kw = dict(seed=args.data_seed, n_points=args.n_points,
+              val_frac=args.val_frac, lambda_body=args.lambda_body,
+              relabel=not args.no_relabel, device=args.device)
+    n_tr = args.n_train if args.n_train > 0 else None
+    n_va = args.n_val if args.n_val > 0 else None
+    _, K_tr, _ = load_split(args.data_path, 'train', n=n_tr, **kw)
+    _, K_va, info = load_split(args.data_path, 'val', n=n_va, **kw)
+    stage = info['stage'].to(dev) if 'stage' in info else None
+    return K_tr.to(dev), K_va.to(dev), stage
+
+
 def frechet_baseline(args, dev):
     """Best constant predictor under AIRM: fit on train, evaluate on val."""
-    kw = dict(seed=args.data_seed, lambda_body=args.lambda_body,
-              relabel=not args.no_relabel, device=args.device)
-    _, K_tr = load_peg_hole_split(args.peghole_root, 'train', n=args.n_train,
-                                  n_points=args.n_points, **kw)
-    _, K_va, info = load_peg_hole_split(args.peghole_root, 'val', n=args.n_val,
-                                        n_points=args.n_points, extras=True,
-                                        **kw)
-    K_tr, K_va = K_tr.to(dev), K_va.to(dev)
-    stage = info['stage'].to(dev)
+    K_tr, K_va, stage = load_labels(args, dev)
 
     M_tr, g_tr, it_tr = karcher_mean(K_tr)
     M_va, g_va, it_va = karcher_mean(K_va)
@@ -166,8 +181,7 @@ def frechet_baseline(args, dev):
         'clamped_val': n_cl,
         'K_train_mean_eigs': torch.linalg.eigvalsh(M_tr).tolist(),
     }
-    print('\n[baseline] constant predictors on val '
-          f'(n={K_va.shape[0]}, N={args.n_points})')
+    print(f'\n[baseline] constant predictors on val (n={K_va.shape[0]})')
     print(_fmt('Frechet mean (train-fit)', res['frechet_train_fit_on_val']))
     print(_fmt('Frechet mean (val oracle)', res['frechet_val_oracle']))
     print(_fmt('identity', res['identity_predictor']))
@@ -182,17 +196,20 @@ def frechet_baseline(args, dev):
 def label_mc_noise(args, dev):
     """Resolution of the target itself: the same scenes, two different
     subsample draws.  Any val_d below this is fitting one draw, not physics."""
-    if args.n_points is None or args.no_relabel:
-        print('\n[mc-noise] --n-points 없이/relabel 없이는 두 번째 뽑기를 '
-              '정의할 수 없어 건너뜁니다')
+    # 같은 장면을 다시 뽑아 라벨을 재계산할 수 있어야 한다.  라벨 공식을 아는
+    # 형식(peg-and-hole)에서만 가능하다.
+    if not is_peg_hole(args.data_path) or args.n_points is None \
+            or args.no_relabel:
+        print('\n[mc-noise] 라벨을 재계산할 수 있는 데이터셋 + --n-points 가 '
+              '있어야 두 번째 뽑기를 정의할 수 있어 건너뜁니다')
         return None
     n = min(args.n_val, args.mc_n)
     common = dict(n=n, n_points=args.n_points, lambda_body=args.lambda_body,
                   relabel=True, device=args.device)
-    _, K_a, info = load_peg_hole_split(args.peghole_root, 'val',
+    _, K_a, info = load_peg_hole_split(args.data_path, 'val',
                                        seed=args.data_seed, extras=True,
                                        **common)
-    _, K_b = load_peg_hole_split(args.peghole_root, 'val',
+    _, K_b = load_peg_hole_split(args.data_path, 'val',
                                  seed=args.data_seed + args.mc_seed_offset,
                                  **common)
     K_a, K_b = K_a.to(dev), K_b.to(dev)
@@ -212,9 +229,18 @@ def label_mc_noise(args, dev):
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--peghole-root', default='data/peg_hole/v2')
-    ap.add_argument('--n-points', type=int, default=1024)
+    ap = argparse.ArgumentParser(
+        description=('학습 전에 돌린다. --data-path 하나로 peg-and-hole 샤드 '
+                     '데이터셋과 직접 준비한 (cloud, K) 데이터셋을 모두 받는다 '
+                     '(형식은 경로를 보고 판별). stage별 분해와 MC 라벨 잡음은 '
+                     '라벨을 재계산할 수 있는 형식에서만 나온다.'))
+    ap.add_argument('--data-path', default='data/peg_hole/v2',
+                    help='데이터셋 경로 (형식은 자동 판별)')
+    ap.add_argument('--val-frac', type=float, default=0.1,
+                    help='경로가 파일 하나일 때 val 로 뗄 비율')
+    ap.add_argument('--n-points', type=int, default=None,
+                    help=('서브샘플 해상도 (peg-hole 권장 1024). 라벨을 '
+                          '재계산할 수 없는 형식은 저장된 그대로 쓴다'))
     ap.add_argument('--n-train', type=int, default=20480)
     ap.add_argument('--n-val', type=int, default=2048)
     ap.add_argument('--lambda-body', type=float, default=None)
@@ -232,14 +258,16 @@ def main():
     args = ap.parse_args()
 
     dev = torch.device(args.device)
-    meta = read_meta(args.peghole_root)
-    lam = (meta['cfg']['lambda_body'] if args.lambda_body is None
-           else args.lambda_body)
-    print(f'[dataset] {args.peghole_root}  version {meta.get("version")}  '
-          f'stored N {meta["n_points"]} -> {args.n_points}  lambda {lam}')
-
-    res = {'args': vars(args), 'dataset_version': meta.get('version'),
-           'lambda_body': lam}
+    res = {'args': vars(args)}
+    if is_peg_hole(args.data_path):
+        meta = read_meta(args.data_path)
+        lam = (meta['cfg']['lambda_body'] if args.lambda_body is None
+               else args.lambda_body)
+        print(f'[dataset] {args.data_path}  version {meta.get("version")}  '
+              f'stored N {meta["n_points"]} -> {args.n_points}  lambda {lam}')
+        res.update(dataset_version=meta.get('version'), lambda_body=lam)
+    else:
+        print(f'[dataset] {args.data_path}')
     res.update(frechet_baseline(args, dev))
     if not args.skip_mc:
         mc = label_mc_noise(args, dev)
@@ -254,6 +282,8 @@ def main():
           + (f'd = {lo:.3f}' if lo is not None else '(생략됨)'))
 
     if args.out:
+        # 5분 걸린 계산을 없는 디렉터리 때문에 버리지 않는다.
+        os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
         with open(args.out, 'w') as f:
             json.dump(res, f, indent=2)
         print(f'\n[saved] {args.out}')

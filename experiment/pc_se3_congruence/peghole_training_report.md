@@ -191,9 +191,10 @@ $$m'=(Rp_i+p)\times R(p_j-p_i)=R\big(p_i\times(p_j-p_i)\big)+p\times Rf=Rm+p\tim
 따라서
 
 $$w_{ij}(T\cdot P)=A_T\,w_{ij}(P),\qquad
-A_T=\mathrm{Ad}_T^{-\top}=\begin{bmatrix}R&0\\ \hat pR&R\end{bmatrix}$$
+A_T=\mathrm{Ad}_T^{-\top}=\begin{bmatrix}R&\hat pR\\ 0&R\end{bmatrix}$$
 
-저장 순서는 $[f;m]$이고 $A_T$가 **블록 하삼각**이라 **힘 슬롯이 병진에 blind**하다.
+저장 순서는 $[m;f]$(moment-first)이고 $A_T$가 **블록 상삼각**이라 **힘 슬롯이 병진에
+blind**하다.
 물리적으로 $w_{ij}$는 $p_i$를 지나 $p_j$를 향하는 직선을 따르는 **순수 힘의 wrench**이며,
 Klein 행렬 $Q$는 이 단계에 등장하지 않는다.
 
@@ -468,7 +469,7 @@ teacher 단계에는 기준선이 붙지 않는다 — 기준선은 물리 라�
 
 ```bash
 NTRAIN=6144 EPOCHS=60 BASELINE_JSON=<기준선 json> \
-bash experiment/pc_se3_congruence/run_peghole_experiments.sh compare
+bash experiment/pc_se3_congruence/run_experiments.sh compare
 ```
 
 `ARM_A` / `ARM_B` / `ARM_C`로 팔을 지정하고 `skip`으로 끈다. **데이터·seed·표본수·epoch
@@ -969,7 +970,7 @@ seed 간 분산을 측정하지 않았다. 0803 문서 §7-3이 요청한 다중
 
 ```bash
 conda activate lieneurons && cd <repo 루트>
-bash experiment/pc_se3_congruence/run_peghole_experiments.sh
+bash experiment/pc_se3_congruence/run_experiments.sh
 ```
 
 인자 없이 이게 전부다. 기본값이 본학습 설정이고(N=1024, train 20,480, 150 epoch,
@@ -981,7 +982,7 @@ GPU 2장 병렬), 사전 점검(conda 환경·GPU·메모리·데이터셋 versi
 ```bash
 ARM_A=skip ARM_C=skip \
 BASELINE_JSON=experiment/pc_se3_congruence/train_results/peghole/baseline-N1024.json \
-bash experiment/pc_se3_congruence/run_peghole_experiments.sh compare
+bash experiment/pc_se3_congruence/run_experiments.sh compare
 ```
 
 또는 `stored` 단계에 `--pw-force-invariant`를 직접 전달한다. `NTRAIN` 20,480 이상,
@@ -991,7 +992,7 @@ bash experiment/pc_se3_congruence/run_peghole_experiments.sh compare
 
 ```bash
 NTRAIN=6144 EPOCHS=60 BASELINE_JSON=<기준선 json> \
-bash experiment/pc_se3_congruence/run_peghole_experiments.sh compare
+bash experiment/pc_se3_congruence/run_experiments.sh compare
 ```
 
 ### 산출물

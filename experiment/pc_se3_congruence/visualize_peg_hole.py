@@ -1,4 +1,4 @@
-"""Sanity/report figures for the peg-and-hole dataset.
+"""[CURRENT TOOL] Sanity/report figures for the peg-and-hole dataset.
 
   fig 1  peghole_scenes.png   example scenes (canonical frame, same generator
                               distribution as the dataset) -- rows: stage,

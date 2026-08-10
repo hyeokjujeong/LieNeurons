@@ -1,4 +1,5 @@
-"""Vector/covector coupling and Klein-form nonlinearity experiments.
+"""[SUPERSEDED gen-1 study]
+Vector/covector coupling and Klein-form nonlinearity experiments.
 
 This script answers two questions left open by the structural equivariance
 checks in ``verify.py``:
@@ -17,7 +18,7 @@ singular on the Klein null cone, which contains every Pluecker line feature.
 Run from the repository root:
 
     conda run -n lieneurons python \
-        experiment/pc_se3_congruence/analyze_klein_gate.py
+        experiment/pc_se3_congruence/legacy/analyze_klein_gate.py
 
 Results are written to ``klein_gate_results.json`` next to this file.
 """

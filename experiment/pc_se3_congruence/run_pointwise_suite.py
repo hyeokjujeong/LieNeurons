@@ -1,4 +1,5 @@
-"""Run the pointwise wrench -> stiffness experiment over the object suite.
+"""[CURRENT ENTRY POINT]
+Run the pointwise wrench -> stiffness experiment over the object suite.
 
 Pipeline under test (axis convention: N points, k neighbours, C channels,
 H factors, K the 6x6 stiffness):
@@ -134,7 +135,7 @@ def main():
     # degree_matched는 분포·내재차원·N과 무관하게 평균 degree를 target_k로 고정한다.
     # §5.5의 published 수치는 density_scaled + alpha 1.15 + target_k 16으로 얻었고
     # (N=48/128/512에서 평균 degree 9.6/13.5/15.3), 그 조합은
-    # run_pointwise_gpu_experiments.sh가 플래그로 고정하므로 재현에는 영향이 없다.
+    # run_experiments.sh가 플래그로 고정하므로 재현에는 영향이 없다.
     ap.add_argument('--pw-radius-mode', default='degree_matched',
                     choices=['degree_matched', 'global_scale',
                              'density_scaled', 'fixed', 'knn_adaptive',

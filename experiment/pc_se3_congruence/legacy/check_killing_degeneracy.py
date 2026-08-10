@@ -1,4 +1,5 @@
-"""Why the se(3) Killing form must not be used for gating or normalization.
+"""[SUPERSEDED gen-1 study]
+Why the se(3) Killing form must not be used for gating or normalization.
 
 Backs the claims of section 5.1 of docs/pc_se3_congruence_report.md:
 
@@ -15,7 +16,7 @@ Backs the claims of section 5.1 of docs/pc_se3_congruence_report.md:
       blows up on bracket outputs w1 x w2 as the two directions align.
 
 Run from the repo root:
-    python experiment/pc_se3_congruence/check_killing_degeneracy.py
+    python experiment/pc_se3_congruence/legacy/check_killing_degeneracy.py
 """
 import sys
 

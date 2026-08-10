@@ -2,7 +2,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
-
+.codex
 # C extensions
 *.so
 
@@ -160,6 +160,9 @@ cython_debug/
 #.idea/
 
 
+# macOS
+.DS_Store
+
 # matlab
 .asv
 .fig
@@ -181,8 +184,8 @@ training_mlp_aug_equiv.txt
 ## document
 docs/
 
-## fig
-experiment/pc_se3_congruence/figs/
+## fig (scripts write figs/ next to themselves, incl. experiment/*/legacy/)
+**/figs/
 
 ## results
 *.json
