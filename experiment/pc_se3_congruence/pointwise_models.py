@@ -53,7 +53,8 @@ import torch
 import torch.nn as nn
 
 from core.lie_neurons_layers import LNLinear
-from experiment.pc_se3_congruence.models import covector_bracket, klein_gram
+from experiment.pc_se3_congruence.models import (LNLinearPitch, covector_bracket,
+                                                 klein_gram)
 from experiment.pc_se3_congruence.pointwise_graph import (EdgeInvariants,
                                                           build_local_graph)
 
@@ -63,6 +64,11 @@ POOL_MODES = ('basis', 'basis_mean', 'attention', 'sum', 'mean')
 BRACKET_MODES = ('none', 'separable', 'pairwise')
 GATE_MODES = ('none', 'projected', 'full')
 NORMALIZE_MODES = ('nh', 'beta', 'one')
+# Which layers get the second equivariant generator N (m, f) = (f, 0), i.e. the
+# pitch branch.  'none' reproduces the old model exactly.  'head' is already
+# enough for K to reach the full SPD cone; 'all' additionally revives the
+# scalar track, since klein_pair no longer vanishes on pitched features.
+PITCH_MODES = ('none', 'head', 'all')
 
 
 # ------------------------------------------------------------------ helpers
@@ -459,12 +465,19 @@ class PointwiseCovectorBlock(nn.Module):
     def __init__(self, in_channels, out_channels, use_bracket=True,
                  gate='projected', message_passing=False, msg_channels=8,
                  hidden=32, n_proj=8, n_rbf=8, use_global_context=True,
-                 use_force_invariant=False, zero_init_bracket=True):
+                 use_force_invariant=False, zero_init_bracket=True,
+                 use_pitch=False):
         super().__init__()
         self.mp = (InvariantMessagePassing(in_channels, msg_channels, hidden,
                                            max(2, n_proj // 2), n_rbf)
                    if message_passing else None)
-        self.linear = LNLinear(in_channels, out_channels)
+        # Pitch in the BLOCKS is optional on top of the head (the head alone
+        # already suffices for expressivity).  What it buys is the scalar
+        # track: on pitched features klein_pair(a, b) = (l_a + l_b)(f_a . f_b)
+        # is no longer identically zero, so the gate and beta MLPs stop seeing
+        # a constant 0 input -- the degeneracy of peghole_training_report §3.7.
+        self.linear = (LNLinearPitch if use_pitch else LNLinear)(in_channels,
+                                                                 out_channels)
         if use_bracket:
             self.dir_u = nn.Linear(out_channels, out_channels, bias=False)
             self.dir_v = nn.Linear(out_channels, out_channels, bias=False)
@@ -512,7 +525,7 @@ class LateSecondMomentHead(nn.Module):
 
     def __init__(self, in_channels, factors=8, hidden=32, n_proj=8,
                  weight_mode='learned', normalize='nh', use_global=True,
-                 use_force_invariant=False, learn_scale=True):
+                 use_force_invariant=False, learn_scale=True, use_pitch=False):
         super().__init__()
         if weight_mode not in ('learned', 'uniform'):
             raise ValueError("weight_mode must be 'learned' or 'uniform'")
@@ -521,7 +534,12 @@ class LateSecondMomentHead(nn.Module):
         self.factors = factors
         self.weight_mode = weight_mode
         self.normalize = normalize
-        self.linear = LNLinear(in_channels, factors)
+        # use_pitch: this is the ONE layer that decides what K can represent.
+        # With LNLinear every z stays a zero-pitch line wrench through its own
+        # point and K is stuck in the push-only contact cone; LNLinearPitch adds
+        # the missing equivariant generator N and opens the full SPD cone.
+        self.linear = (LNLinearPitch if use_pitch else LNLinear)(in_channels,
+                                                                 factors)
         # A single global scalar K -> exp(g) K.  It is trivially invariant, so
         # it costs no structure, and it gives the AIRM objective a direct
         # handle on the overall magnitude: a pure scale mismatch s contributes
@@ -606,11 +624,13 @@ class PointwiseStiffnessModel(nn.Module):
                  gate='projected', use_global_context=True,
                  message_passing=False, msg_channels=8, hidden=32, n_proj=8,
                  normalize='nh', beta_mode='learned',
-                 use_force_invariant=False, learn_scale=True,
+                 use_force_invariant=False, learn_scale=True, pitch='none',
                  dist_compute_mode='donot_use_mm_for_euclid_dist'):
         super().__init__()
         if len(channels) < 2:
             raise ValueError('channels needs at least (C_0, C_1)')
+        if pitch not in PITCH_MODES:
+            raise ValueError(f'pitch must be one of {PITCH_MODES}')
         self.graph_kwargs = dict(candidate_k=candidate_k,
                                  radius_mode=radius_mode,
                                  radius_alpha=radius_alpha,
@@ -628,13 +648,15 @@ class PointwiseStiffnessModel(nn.Module):
                 gate=gate, message_passing=message_passing,
                 msg_channels=msg_channels, hidden=hidden, n_proj=n_proj,
                 n_rbf=n_rbf, use_global_context=use_global_context,
-                use_force_invariant=use_force_invariant)
+                use_force_invariant=use_force_invariant,
+                use_pitch=(pitch == 'all'))
             for i in range(len(dims) - 1)])
         self.head = LateSecondMomentHead(
             dims[-1], factors=factors, hidden=hidden, n_proj=n_proj,
             weight_mode=beta_mode, normalize=normalize,
             use_global=use_global_context,
-            use_force_invariant=use_force_invariant, learn_scale=learn_scale)
+            use_force_invariant=use_force_invariant, learn_scale=learn_scale,
+            use_pitch=(pitch != 'none'))
         self.last_graph_stats = {}
 
     def build_graph(self, P):

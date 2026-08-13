@@ -40,6 +40,8 @@
 #
 # 환경변수
 #   ROOT NPTS NTRAIN NVAL EPOCHS BATCH LR CH FAC SEED
+#   PW_PITCH   none | head | all.  기본 none = 이전 실행과 완전히 동일.
+#              head/all 은 zero-pitch 구속을 푼다 (STIFFNESS_CEILING.md §9)
 #   DEV        기본 학습 장치 (합성 suite 도 이걸 쓴다)
 #   DEV2       PARALLEL=1 일 때 stored 를 올릴 두 번째 장치
 #   PARALLEL   1 이면 teacher(DEV) 와 stored(DEV2) 를 동시에 실행
@@ -68,6 +70,12 @@ EVALBATCH="${EVALBATCH:-64}"
 LR="${LR:-1e-3}"
 CH="${CH:-16 32 64 32}"
 FAC="${FAC:-16}"
+# 두 번째 등변 생성자 N (m,f)->(f,0).  none 이면 이전 실행과 완전히 동일하다.
+# head/all 이면 latent 가 zero-pitch line wrench 구속에서 풀려 K 가 전체 SPD
+# cone 에 도달한다 (peg_in_hole_august_demo/STIFFNESS_CEILING.md).
+# teacher 단계의 타깃 모델도 같은 설정으로 만들어지므로, realizability 검사는
+# 언제나 '지금 학습하는 클래스'에 대한 검사로 유지된다.
+PW_PITCH="${PW_PITCH:-none}"
 SEED="${SEED:-100}"
 DEV="${DEV:-cuda:0}"
 DEV2="${DEV2:-cuda:1}"
@@ -232,6 +240,7 @@ bench() {
         --lr "${LR}" \
         --pw-channels ${CH} \
         --pw-factors "${FAC}" \
+        --pw-pitch "${PW_PITCH}" \
         --data-seed "${SEED}" \
         --device "${dev}" \
         --wandb-mode "${WANDB_MODE}" \

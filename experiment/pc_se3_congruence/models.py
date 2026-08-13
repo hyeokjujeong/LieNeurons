@@ -170,6 +170,48 @@ def covector_bracket(F1, F2):
                       torch.cross(f1, f2, dim=2)], dim=2)
 
 
+class LNLinearPitch(nn.Module):
+    """LNLinear generalised to the FULL equivariant linear algebra on se(3)*.
+
+    End_SE(3)(se(3)*) is exactly TWO-dimensional, span{I, N} with
+
+        N (m, f) = (f, 0),      N^2 = 0,
+
+    because N Ad_T^{-T} = Ad_T^{-T} N for every T (both sides are [[0,R],[0,0]]).
+    ``LNLinear`` is the a*I part alone: it mixes channels with scalars, which
+    keeps every feature inside L_p = {(p x f, f)} -- a zero-pitch line wrench
+    through its own point.  The bracket and the Klein gate preserve L_p too, so
+    with only LNLinear the whole network is trapped in a 3-dimensional subspace
+    per point and K is confined to the push-only contact-stiffness cone
+    (STIFFNESS_CEILING.md, theorem 1).  N is the missing generator, and its
+    coefficient IS the pitch:
+
+        (a I + b N)(p x f, f) = (p x F + (b/a) F,  F),   F = a f.
+
+    After the channel mix the moment offsets combine into an arbitrary G, so
+    z = (p x F + G, F) sweeps all of se(3)* and K reaches the full SPD cone.
+
+    b is zero-initialised, so the layer starts numerically identical to
+    LNLinear and this is a strict generalisation (LNLinear is the b = 0 case).
+    Unlike ``core.lie_neurons_layers.LNLinear`` this layer is se(3)*-specific:
+    it assumes the 6-vector [m; f] storage on dim 2.
+    """
+
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.a = nn.Linear(in_channels, out_channels, bias=False)
+        self.b = nn.Linear(in_channels, out_channels, bias=False)
+        nn.init.zeros_(self.b.weight)
+
+    def forward(self, x):
+        """x: [B, C, 6, N] stored [m; f] -> [B, C', 6, N]."""
+        def mix(w, y):
+            return w(y.transpose(1, -1)).transpose(1, -1)
+        m, f = x[:, :, 0:3], x[:, :, 3:6]
+        return torch.cat([mix(self.a, m) + mix(self.b, f), mix(self.a, f)],
+                         dim=2)
+
+
 class LNCovectorBracket(nn.Module):
     """Mirror of LNLieBracket, but using covector_bracket. Native to se(3)*."""
 

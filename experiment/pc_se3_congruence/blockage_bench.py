@@ -116,7 +116,8 @@ def build_pointwise_model(args, seed):
         message_passing=args.pw_message_passing,
         msg_channels=args.pw_msg_channels, hidden=args.pw_hidden,
         n_proj=args.pw_proj, normalize=args.pw_normalize,
-        beta_mode=args.pw_beta, use_force_invariant=args.pw_force_invariant)
+        beta_mode=args.pw_beta, use_force_invariant=args.pw_force_invariant,
+        pitch=args.pw_pitch)
 
 
 def build_model(args, seed=None):
@@ -734,6 +735,13 @@ def main():
                     help='factor별 positive weight beta_ih')
     pw.add_argument('--pw-force-invariant', action='store_true',
                     help='gate/head 불변량에 f_c . f_d 계열 추가')
+    pw.add_argument('--pw-pitch', default='none',
+                    choices=['none', 'head', 'all'],
+                    help=('두 번째 등변 생성자 N (m,f)->(f,0) 을 쓸 층. none이면 '
+                          '모든 latent가 자기 점을 지나는 zero-pitch line wrench라 '
+                          'K가 "미는 접촉"만으로 만들 수 있는 원뿔에 갇힌다 '
+                          '(STIFFNESS_CEILING.md). head면 K가 전체 SPD cone에 '
+                          '도달하고, all이면 klein_pair도 되살아난다'))
     tr.add_argument('--baseline-json',
                     help=('peghole_baseline.py가 낸 json. Frechet 기준선과 라벨 '
                           'MC 잡음을 읽어 val_d_rel(기준선 대비 비율)을 '
@@ -812,6 +820,7 @@ def one(args):
               if args.encoder == 'tensor' else '')
            + (f'-{args.pw_radius_mode}-{args.pw_pool}-br{args.pw_bracket}'
               f'-gate{args.pw_gate}' + ('-mp' if args.pw_message_passing else '')
+              + (f'-pitch{args.pw_pitch}' if args.pw_pitch != 'none' else '')
               if args.encoder == 'pointwise' else '')
            + (f'-target-{args.target_graph}'
               if args.target_graph != 'knn' else '')
