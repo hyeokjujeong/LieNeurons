@@ -62,6 +62,7 @@ torch.set_default_dtype(torch.float64)
 from data_loader.pc_stiffness_data_loader import load_split
 from experiment.pc_se3_congruence.data_synth import (c2_clouds,
                                                      contact_spring_all_pairs_K,
+                                                     object_clouds,
                                                      contact_spring_K,
                                                      contact_spring_kernel_K,
                                                      sample_clouds,
@@ -92,6 +93,7 @@ DATASETS = {
     'c2': c2_clouds,
     'tetra': tetra_orbit_clouds,
     'iid': lambda n, npts, gen, **kw: sample_clouds(n, npts, gen, trans_scale=1.0),
+    'objects': object_clouds,
 }
 
 
@@ -326,8 +328,12 @@ def run_training(args, wb):
         gen = torch.Generator().manual_seed(args.data_seed)
         make = DATASETS[args.dataset]
         n_total = args.n_train + args.n_val
-        P = make(n_total, args.n_points, gen, eta=args.eta) \
-            if args.dataset != 'iid' else make(n_total, args.n_points, gen)
+        if args.dataset == 'objects':
+            P = make(n_total, args.n_points, gen, shape=args.shape)
+        elif args.dataset != 'iid':
+            P = make(n_total, args.n_points, gen, eta=args.eta)
+        else:
+            P = make(n_total, args.n_points, gen)
         P = P.to(args.device)
     if args.target_graph == 'stored':
         target_fn = None
@@ -422,7 +428,7 @@ def run_training(args, wb):
                 # pre-clip norm: the direct evidence for "is this an
                 # optimisation problem?" when the teacher phase does not reach 0
                 gtot += float(torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), 1.0))
+                    model.parameters(), args.grad_clip))
                 opt.step()
             tot, nb, ncl = tot + loss.item(), nb + 1, ncl + n_c
         if sched is not None:
@@ -611,6 +617,7 @@ def main():
     tr.add_argument('--epochs', type=int, default=150)
     tr.add_argument('--batch', type=int, default=32)
     tr.add_argument('--lr', type=float, default=3e-4)
+    tr.add_argument('--grad-clip', type=float, default=1.0)
     ds.add_argument('--n-train', type=int, default=512)
     ds.add_argument('--n-val', type=int, default=128)
     ds.add_argument('--n-points', type=int, default=None,
@@ -657,6 +664,8 @@ def main():
     ts.add_argument('--tensor-backbone-channels', type=int, nargs='+',
                     default=[32, 32, 16],
                     help='tensor covector backbone의 hidden/output channel 수')
+    ds.add_argument('--shape', default='mixed',
+                    help='objects 데이터셋의 형태: mixed/box/cylinder/mug/lbracket/bowl')
     md.add_argument('--channels', type=int, nargs='+', default=[8, 32, 32, 16])
 
     # ------------------------------------------------ encoder=pointwise 전용
@@ -793,7 +802,9 @@ def one(args):
         adj = max(12, args.n_points // 12 * 12)
         print(f'[tetra] n_points {args.n_points} -> {adj} (12의 배수 보정)')
         args.n_points = adj
-    tag = (f'{args.dataset}-{args.method}-{args.nonlinear}-{args.recipe}'
+    tag = ((f'{args.dataset}-{args.shape}' if args.dataset == 'objects'
+            else args.dataset)
+           + f'-{args.method}-{args.nonlinear}-{args.recipe}'
            + (f'-{args.encoder}' if args.encoder != 'plueck' else '')
            + (f'-{args.tensor_graph}-{args.tensor_weight}'
               if args.encoder == 'tensor' else '')

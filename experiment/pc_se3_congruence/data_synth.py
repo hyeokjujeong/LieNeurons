@@ -242,3 +242,118 @@ def spd_stats(K):
         'cond_median': cond.median().item(),
         'cond_max': cond.max().item(),
     }
+
+# ------------------------------------------- manipulation-style object clouds
+def _sample_box(n, dims, gen):
+    """상자 표면 균일 샘플 (면적 비례)."""
+    a, b, c = dims
+    areas = torch.tensor([b * c, b * c, a * c, a * c, a * b, a * b])
+    face = torch.multinomial(areas, n, replacement=True, generator=gen)
+    u = torch.rand(n, 2, generator=gen) - 0.5
+    P = torch.zeros(n, 3)
+    for f in range(6):
+        m = face == f
+        ax = f // 2                       # 고정 축
+        sgn = 1.0 if f % 2 == 0 else -1.0
+        others = [i for i in range(3) if i != ax]
+        P[m, ax] = sgn * dims[ax] / 2
+        P[m, others[0]] = u[m, 0] * dims[others[0]]
+        P[m, others[1]] = u[m, 1] * dims[others[1]]
+    return P
+
+
+def _sample_cylinder(n, r, h, gen, caps=True):
+    lat = 2 * torch.pi * r * h
+    cap = torch.pi * r * r
+    w = torch.tensor([lat, cap, cap] if caps else [lat])
+    part = torch.multinomial(w, n, replacement=True, generator=gen)
+    th = torch.rand(n, generator=gen) * 2 * torch.pi
+    P = torch.zeros(n, 3)
+    m = part == 0
+    P[m] = torch.stack([r * th[m].cos(), r * th[m].sin(),
+                        (torch.rand(int(m.sum()), generator=gen) - 0.5) * h], -1)
+    for pi_, sgn in ((1, 1.0), (2, -1.0)):
+        m = part == pi_
+        rr = r * torch.rand(int(m.sum()), generator=gen).sqrt()
+        P[m] = torch.stack([rr * th[m].cos(), rr * th[m].sin(),
+                            torch.full((int(m.sum()),), sgn * h / 2)], -1)
+    return P
+
+
+def _sample_mug(n, gen):
+    """컵(옆면+바닥, 뚜껑 없음) + 반원 손잡이 — 비대칭 물체."""
+    r, h = 0.35, 0.8
+    n_body = int(n * 0.8)
+    body = _sample_cylinder(n_body, r, h, gen, caps=False)
+    nb = n_body // 8                          # 바닥
+    rr = r * torch.rand(nb, generator=gen).sqrt()
+    th = torch.rand(nb, generator=gen) * 2 * torch.pi
+    bottom = torch.stack([rr * th.cos(), rr * th.sin(),
+                          torch.full((nb,), -h / 2)], -1)
+    n_h = n - n_body - nb                     # 손잡이 (반원 튜브, x>0 쪽)
+    t = (torch.rand(n_h, generator=gen) - 0.5) * torch.pi
+    psi = torch.rand(n_h, generator=gen) * 2 * torch.pi
+    a, rho = 0.22, 0.045
+    cx = r + a * t.sin(); cz = a * t.cos()
+    n2x, n2z = t.sin(), t.cos()
+    hx = cx + rho * (psi.cos() * 0 + psi.sin() * n2x)
+    hy = rho * psi.cos()
+    hz = cz + rho * psi.sin() * n2z
+    handle = torch.stack([hx, hy, hz], -1)
+    return torch.cat([body, bottom, handle])
+
+
+def _sample_lbracket(n, gen):
+    """L자 브라켓 (상자 2개 합집합) — 거울면 대칭."""
+    n1 = n // 2
+    P1 = _sample_box(n1, (1.0, 0.4, 0.15), gen) + torch.tensor([0.5, 0., 0.075])
+    P2 = _sample_box(n - n1, (0.15, 0.4, 1.0), gen) + torch.tensor([0.075, 0., 0.5])
+    return torch.cat([P1, P2]) - torch.tensor([0.3, 0., 0.3])
+
+
+def _sample_bowl(n, r, gen):
+    """반구 껍질 — 연속 회전대칭."""
+    v = torch.randn(n, 3, generator=gen)
+    v = v / v.norm(dim=1, keepdim=True)
+    v[:, 2] = -v[:, 2].abs()
+    return r * v
+
+
+OBJECT_SHAPES = ('box', 'cylinder', 'mug', 'lbracket', 'bowl')
+
+
+def object_clouds(n_samples, n_points, gen=None, dtype=torch.float64,
+                  shape='mixed', jitter=0.01, trans_scale=0.5, **_):
+    """Manipulation형 물체 표면 point cloud, [S, N, 3].
+
+    대칭 계층을 의도적으로 스팬한다: cylinder/bowl(연속 회전대칭 — f-신호 억제
+    예상), lbracket(거울면), box(다수 C2), mug(비대칭).  표면 랜덤 샘플이라 점
+    집합의 대칭은 정확하지 않고 통계적(soft) — 실제 스캔의 근사-대칭 상황에 대응.
+    jitter는 센서 노이즈 근사.
+    """
+    out = []
+    for i in range(n_samples):
+        sh = shape if shape != 'mixed' else \
+            OBJECT_SHAPES[int(torch.randint(len(OBJECT_SHAPES), (1,),
+                                            generator=gen))]
+        if sh == 'box':
+            dims = 0.3 + torch.rand(3, generator=gen) * 0.9
+            P = _sample_box(n_points, dims, gen)
+        elif sh == 'cylinder':
+            r = 0.2 + 0.3 * torch.rand(1, generator=gen).item()
+            h = 0.5 + 0.7 * torch.rand(1, generator=gen).item()
+            P = _sample_cylinder(n_points, r, h, gen)
+        elif sh == 'mug':
+            P = _sample_mug(n_points, gen)
+        elif sh == 'lbracket':
+            P = _sample_lbracket(n_points, gen)
+        else:
+            P = _sample_bowl(n_points, 0.3 + 0.4 *
+                             torch.rand(1, generator=gen).item(), gen)
+        scale = 0.8 + 0.4 * torch.rand(1, generator=gen).item()
+        P = P.to(dtype) * scale
+        P = P + jitter * torch.randn(P.shape, generator=gen, dtype=dtype)
+        R = random_SO3(gen, dtype)
+        p = torch.randn(3, generator=gen, dtype=dtype) * trans_scale
+        out.append(P @ R.T + p)
+    return torch.stack(out)

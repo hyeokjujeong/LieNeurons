@@ -193,3 +193,5 @@ docs/
 wandb/
 AGENTS.md
 *.png
+*.pdf
+*.gif
